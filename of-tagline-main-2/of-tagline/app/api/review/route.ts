@@ -21,8 +21,10 @@ function hardCapJa(s: string, max: number): string {
 
 const normMustWords = (src: unknown): string[] => {
   const s: string = Array.isArray(src) ? (src as unknown[]).map(String).join(" ") : String(src ?? "");
-  return s.split(/[ ,、\s\n/]+).map(w => w.trim()).filter(Boolean);
+  // 半角/全角スペース・カンマ・読点・改行・スラッシュで分割
+  return s.split(/[ ,、\s\n\/]+/).map(w => w.trim()).filter(Boolean);
 };
+
 
 // 価格・金額系と余計な連続空白のサニタイズ（自動削除はここまでに留める）
 const stripPriceAndSpaces = (s: string) =>
