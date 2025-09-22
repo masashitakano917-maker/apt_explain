@@ -1,5 +1,9 @@
+// app/api/review/route.ts
 export const runtime = "nodejs";
+
 import OpenAI from "openai";
+// ✅ 新ルール（禁止用語／不当表示／商標／二重価格）の検出ロジック
+import { checkText, type CheckIssue } from "../../../lib/checkPolicy";
 
 /* ---------- helpers ---------- */
 const countJa = (s: string) => Array.from(s || "").length;
@@ -21,24 +25,12 @@ const normMustWords = (src: unknown): string[] => {
   return s.split(/[ ,、\s\n/]+/).map(w => w.trim()).filter(Boolean);
 };
 
+// 価格・金額系と余計な連続空白のサニタイズ（自動削除はここまでに留める）
 const stripPriceAndSpaces = (s: string) =>
   s
     .replace(/(価格|金額|[一二三四五六七八九十百千万億兆\d０-９,，\.]+(?:億|万)?円)/g, "")
     .replace(/\s{2,}/g, " ")
     .trim();
-
-const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const stripWords = (s: string, words: string[]) =>
-  s.replace(new RegExp(`(${words.map(esc).join("|")})`, "g"), "");
-
-/* ---------- BAN ---------- */
-const BANNED = [
-  "完全","完ぺき","絶対","万全","100％","フルリフォーム","理想","日本一","日本初","業界一","超","当社だけ","他に類を見ない",
-  "抜群","一流","秀逸","羨望","屈指","特選","厳選","正統","由緒正しい","地域でナンバーワン","最高","最高級","極","特級","最新",
-  "最適","至便","至近","一級","絶好","買得","掘出","土地値","格安","投売り","破格","特安","激安","安値","バーゲンセール",
-  "ディズニー","ユニバーサルスタジオ",
-  "歴史ある","歴史的","歴史的建造物","由緒ある"
-];
 
 /* ---------- STYLE PRESETS（3トーン） ---------- */
 function styleGuide(tone: string): string {
@@ -66,7 +58,7 @@ function styleGuide(tone: string): string {
   ].join("\n");
 }
 
-/** 改稿文を min〜max に収める矯正（最大3回） */
+/** 文字数を min〜max に収める矯正（最大3回） */
 async function ensureLengthReview(opts: {
   openai: OpenAI; draft: string; min: number; max: number; tone: string; style: string; request?: string;
 }) {
@@ -89,21 +81,13 @@ async function ensureLengthReview(opts: {
             `目的: 文字数を${opts.min}〜${opts.max}（全角）に${need === "expand" ? "増やし" : "収め"}る。\n` +
             "事実が不足する場合は一般的で安全な叙述で補い、固有の事実を創作しない。価格/金額/円/万円・電話番号・URLは禁止。"
         },
-        {
-          role: "user",
-          content: JSON.stringify({
-            text: out,
-            request: opts.request || "",
-            action: need
-          })
-        }
+        { role: "user", content: JSON.stringify({ text: out, request: opts.request || "", action: need }) }
       ]
     });
     try {
       out = String(JSON.parse(r.choices?.[0]?.message?.content || "{}")?.improved || out);
     } catch { /* keep out */ }
     out = stripPriceAndSpaces(out);
-    out = stripWords(out, BANNED);
     if (countJa(out) > opts.max) out = hardCapJa(out, opts.max);
   }
   return out;
@@ -131,7 +115,7 @@ export async function POST(req: Request) {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const STYLE_GUIDE = styleGuide(tone);
 
-    // ① 校閲/改善
+    // ① 校閲/改善（モデル補助。禁止語はAIに除去させず、人が判断できるように残す設計）
     const system =
       'Return ONLY a json object like {"improved": string, "issues": string[], "summary": string}. (json)\n' +
       [
@@ -140,7 +124,7 @@ export async function POST(req: Request) {
         STYLE_GUIDE,
         `文字数は【厳守】${minChars}〜${maxChars}（全角）。`,
         "価格/金額/円/万円・電話番号・外部URLは禁止。",
-        `禁止語：${BANNED.join("、")}`,
+        "固有名詞・事実の創作はしない。根拠不明な最上級表現・投資有利断定は避ける。"
       ].join("\n");
 
     const payload = {
@@ -154,7 +138,7 @@ export async function POST(req: Request) {
       checks: [
         "指定トーン・スタイルに合致",
         "マストワードが自然に含まれる",
-        "禁止語・価格/金額・電話番号・URLなし",
+        "価格/金額・電話番号・URLなし",
         `文字数が ${minChars}〜${maxChars} に収まる`,
         "誤字脱字/不自然表現の修正",
       ],
@@ -171,24 +155,23 @@ export async function POST(req: Request) {
     });
 
     let improved = text;
-    let issues: string[] = [];
+    let issuesTextFromModel: string[] = [];
     let summary = "";
 
     try {
       const raw = r1.choices?.[0]?.message?.content || "{}";
       const p = JSON.parse(raw);
       improved = String(p?.improved ?? text);
-      issues = Array.isArray(p?.issues) ? p.issues : [];
+      issuesTextFromModel = Array.isArray(p?.issues) ? p.issues : [];
       summary = String(p?.summary ?? "");
     } catch {
       improved = text;
     }
 
-    // サニタイズ
+    // ② 最低限のサニタイズ（価格/金額の削除のみ）
     improved = stripPriceAndSpaces(improved);
-    improved = stripWords(improved, BANNED);
 
-    // ② 長さ矯正（最大3回）
+    // ③ 長さ矯正（最大3回）
     improved = await ensureLengthReview({
       openai,
       draft: improved,
@@ -199,14 +182,24 @@ export async function POST(req: Request) {
       request,
     });
 
-    // ③ 上限は最終カット
+    // ④ 上限は最終カット
     if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
+
+    // ⑤ 新ポリシーでの機械チェック
+    const issuesStructured: CheckIssue[] = checkText(improved);
+
+    // 既存フロント互換用：string[] でも返す（必要なければ削ってOK）
+    const issues: string[] =
+      issuesStructured.length
+        ? issuesStructured.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`)
+        : issuesTextFromModel;
 
     return new Response(
       JSON.stringify({
         improved,
-        issues,
-        summary: summary || (issues.length ? issues.join(" / ") : ""),
+        issues,                 // 互換用（string[]）
+        issues_structured: issuesStructured, // 新：構造化結果（UIで色分け/位置ハイライト可能）
+        summary: summary || (issuesTextFromModel.length ? issuesTextFromModel.join(" / ") : ""),
       }),
       { status: 200, headers: { "content-type": "application/json" } }
     );
