@@ -1,0 +1,201 @@
+// lib/checkPolicy.ts
+// v3: 不動産表記ルール（ユーザー指定の禁止語/不当表示/商標 + 二重価格）
+// - 全角→半角、ゆらぎ/空白/中黒/ダッシュ許容のルーズ一致
+// - カテゴリ/重大度を付けてUIで色分けしやすく
+
+export type CheckIssue = {
+  id: string;
+  label: string;
+  category: "禁止用語" | "不当表示" | "商標";
+  severity: "error" | "warn";
+  start: number;
+  end: number;
+  excerpt: string;
+  message: string;
+};
+
+const normalize = (s: string) =>
+  s
+    .replace(/[！-～]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xfee0)) // 全角英数記号→半角
+    .replace(/[‐-‒–—―ー−-]/g, "-") // ダッシュ類
+    .replace(/[・･∙•]/g, "・")
+    .replace(/[⇒→➡➔➜➙➛➝➞➟➠]/g, "⇒")
+    .replace(/\u3000/g, " ") // 全角スペース
+    .replace(/\s+/g, " ")
+    .trim();
+
+// 文字間に任意の空白/中点/ダッシュを許容するルーズ正規表現
+const loose = (term: string) => {
+  const sep = "[\\s・\\-‐-‒–—―]*";
+  const escaped = term.split("").map(c => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(escaped.join(sep), "gi");
+};
+
+// === ユーザー指定リスト ===
+// 禁止用語
+const NG_KANZEN = [
+  "完全", "完ぺき", "絶対", "万全", "100%", "フルリフォーム", "理想な", "理想的",
+];
+const NG_YUII = [
+  "日本一", "日本初", "業界一", "超", "当社だけ", "他に類を見ない", "抜群", "一流",
+];
+const NG_SENBETSU = [
+  "特選", "厳選", "正統", "由緒正しい", "地域でナンバーワン",
+];
+const NG_SAIJOU = [
+  "最高", "最高級", "特級", "最新", "最適", "至便", "至近", "一級", "絶好",
+];
+const NG_WARIYASU = [
+  "買得", "掘り出し物", "土地値", "格安", "破格", "特安", "激安", "バーゲンセール",
+];
+const NG_OTHERS = [
+  "心理的瑕疵あり", "告知事項あり", "契約不適合責任免責", "引渡し猶予", "価格応談",
+];
+
+// 不当表示
+const NF_YUURYOU_GONIN = [
+  "稀少物件", "逸品", "とっておき", "人気の", "新築同様", "新品同様",
+  "資産価値ある", "値上がりが期待できる", "将来性あり",
+];
+const NF_YUURI_GONIN = [
+  "自己資金0円", "価格応談", "今だけ", "今しかない", "今がチャンス",
+  "高利回り", "空室の心配なし",
+];
+const NF_KYOUCHOU = [
+  "売主につき手数料不要", "建築確認費用は価格に含む",
+  "国土交通大臣免許だから安心です", "検査済証取得物件",
+];
+const NF_HYOJI_OMISSION = [
+  "傾斜地", "路地状敷地", "高圧電線下",
+];
+
+// 商標名（表記ブレ吸収のためルーズ一致）
+const TM_LIST = [
+  "ディズニーランド",
+  "ユニバーサルスタジオジャパン",
+  "東京ドーム",
+];
+
+// ルール定義
+type Rule = {
+  id: string;
+  label: string;
+  category: "禁止用語" | "不当表示" | "商標";
+  severity: "error" | "warn";
+  pattern: RegExp | ((raw: string, norm: string) => RegExpMatchArray | null);
+  message: string;
+};
+
+const listRules = (
+  id: string,
+  label: string,
+  category: Rule["category"],
+  severity: Rule["severity"],
+  terms: string[],
+  message: string
+): Rule[] =>
+  terms.map((t, i) => ({
+    id: `${id}-${i}`,
+    label,
+    category,
+    severity,
+    pattern: loose(t),
+    message: `${message}（該当語:「${t}」）`,
+  }));
+
+// 二重価格表示（例: 3,200万円 ⇒ 2,980万円）
+const doublePriceRule: Rule = {
+  id: "double-price",
+  label: "不当な二重価格表示",
+  category: "不当表示",
+  severity: "error",
+  pattern: (_raw, norm) => {
+    const re = /(\d{1,3}(?:,\d{3})*|\d+)\s*万?円?\s*⇒\s*(\d{1,3}(?:,\d{3})*|\d+)\s*万?円?/i;
+    const m = norm.match(re);
+    return m ? (m as unknown as RegExpMatchArray) : null;
+  },
+  message: "不当な二重価格表示は不可です（比較根拠のない値引き表現）。",
+};
+
+// 100% のゆらぎ検出（100％/１００％/100 % など）
+const hundredPercentRule: Rule = {
+  id: "hundred-percent",
+  label: "完全表現",
+  category: "禁止用語",
+  severity: "error",
+  pattern: (_raw, norm) => norm.match(/\b100\s*%\b/),
+  message: "完全を示唆する「100%」表現は使用できません。",
+};
+
+const rules: Rule[] = [
+  ...listRules("kanzen", "完全表現", "禁止用語", "error", NG_KANZEN, "完全/断定的な表現は使用できません。"),
+  hundredPercentRule,
+  ...listRules("yuii", "優位表現", "禁止用語", "error", NG_YUII, "市場/他社に対する優位性の断定は不可です。"),
+  ...listRules("senbetsu", "選別表現", "禁止用語", "error", NG_SENBETSU, "出所不明の選別/格付け表現は不可です。"),
+  ...listRules("saijou", "最上級表現", "禁止用語", "error", NG_SAIJOU, "最上級・至上の断定は不可です。"),
+  ...listRules("wariyasu", "割安表現", "禁止用語", "error", NG_WARIYASU, "価格の有利さを断定する表現は不可です。"),
+  ...listRules("others", "その他（取引条件）", "禁止用語", "error", NG_OTHERS, "重要事項/取引条件の断定的記載は不可です。"),
+
+  ...listRules("yuuryou", "優良誤認のおそれ", "不当表示", "error", NF_YUURYOU_GONIN, "品質/希少性/価値向上を断定する表現は不可です。"),
+  ...listRules("yuuri", "有利誤認のおそれ", "不当表示", "error", NF_YUURI_GONIN, "購入・投資上の有利さを断定する表現は不可です。"),
+  ...listRules("kyouchou", "不当な強調表示", "不当表示", "warn", NF_KYOUCHOU, "誤認を招く可能性がある強調表現です。必要性を再確認してください。"),
+  ...listRules("omission", "表示漏れ/隠蔽示唆", "不当表示", "warn", NF_HYOJI_OMISSION, "不利益事項の隠蔽・表示漏れに該当しないか確認してください。"),
+  doublePriceRule,
+
+  ...listRules("tm", "商標名の無断使用", "商標", "error", TM_LIST, "登録商標/著名施設名の無断使用は避けてください。"),
+];
+
+export function checkText(content: string): CheckIssue[] {
+  const issues: CheckIssue[] = [];
+  const raw = content ?? "";
+  const norm = normalize(raw);
+
+  for (const r of rules) {
+    if (typeof r.pattern === "function") {
+      const m = r.pattern(raw, norm);
+      if (m && (m as any).index !== undefined) {
+        const i = (m as any).index as number;
+        const len = (m as any)[0]?.length ?? 0;
+        issues.push(toIssue(r, raw, i, i + len));
+      }
+      continue;
+    }
+    let match: RegExpExecArray | null;
+    const re = new RegExp(r.pattern.source, "gi");
+    while ((match = re.exec(raw)) !== null) {
+      issues.push(toIssue(r, raw, match.index, match.index + match[0].length));
+    }
+  }
+
+  return mergeOverlaps(issues);
+}
+
+function toIssue(r: Rule, raw: string, start: number, end: number): CheckIssue {
+  const safeStart = Math.max(0, start);
+  const safeEnd = Math.min(raw.length, end);
+  return {
+    id: r.id,
+    label: r.label,
+    category: r.category,
+    severity: r.severity,
+    start: safeStart,
+    end: safeEnd,
+    excerpt: raw.slice(safeStart, safeEnd),
+    message: r.message,
+  };
+}
+
+function mergeOverlaps(items: CheckIssue[]): CheckIssue[] {
+  const sorted = [...items].sort((a, b) => a.start - b.start || b.end - a.end);
+  const out: CheckIssue[] = [];
+  for (const cur of sorted) {
+    const last = out[out.length - 1];
+    if (last && cur.start <= last.end && last.message === cur.message) {
+      last.end = Math.max(last.end, cur.end);
+      last.excerpt = `${last.excerpt} / ${cur.excerpt}`;
+    } else {
+      out.push({ ...cur });
+    }
+  }
+  return out;
+}
