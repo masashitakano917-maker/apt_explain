@@ -14,24 +14,55 @@ const escapeHtml = (s: string) =>
   String(s ?? "")
     .replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+const escapeAttr = (s: string) =>
+  String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 
-/** LCSベース差分（挿入/変更 = <mark>） */
-function markDiffRed(original: string, improved: string) {
+/** LCSベース差分：挿入/置換を赤で表示し、data-old に“元文”を格納（まとめて1塊） */
+function diffInlineWithOld(original: string, improved: string) {
   const A = Array.from(original || "");
   const B = Array.from(improved || "");
   const n = A.length, m = B.length;
   const dp: number[][] = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0));
   for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
     dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+
   const out: string[] = [];
   let i = 0, j = 0;
+  let delBuf = ""; // 直前の削除（元文）
+  let insBuf = ""; // 追加（新文）
+
+  const flushIns = () => {
+    if (!insBuf) return;
+    const tip = delBuf ? `元文: ${delBuf}` : "新たに追加";
+    out.push(
+      `<span class="text-red-600 bg-red-50 rounded-[2px] px-0.5"
+              data-old="${escapeAttr(tip)}">${escapeHtml(insBuf)}</span>`
+    );
+    insBuf = ""; delBuf = "";
+  };
+
   while (i < n && j < m) {
-    if (A[i] === B[j]) { out.push(escapeHtml(B[j])); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { i++; } // 削除は赤にしない
-    else { out.push(`<mark class="bg-red-50 text-red-600">${escapeHtml(B[j++])}</mark>`); }
+    if (A[i] === B[j]) {
+      flushIns();
+      out.push(escapeHtml(B[j])); i++; j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      // A側の削除（=元文） → 直後の挿入/置換にぶら下げる
+      delBuf += A[i++]; 
+    } else {
+      // B側の挿入（=新文）
+      insBuf += B[j++];
+    }
   }
-  while (j < m) out.push(`<mark class="bg-red-50 text-red-600">${escapeHtml(B[j++])}</mark>`);
+  // 残り
+  while (j < m) insBuf += B[j++];
+  flushIns();
+  // 末尾に削除だけ残った場合は表示しない（純削除は赤にしない方針）
   return out.join("");
+}
+
+/** 差分（①→②/②→③用）: 赤で新規/変更部分のみ（旧: markDiffRed の代替表示用） */
+function markDiffRed(original: string, improved: string) {
+  return diffInlineWithOld(original, improved);
 }
 
 /* ========= readability meter ========= */
@@ -39,7 +70,6 @@ const JA_SENT_SPLIT = /(?<=[。！？\?])\s*(?=[^\s])/g;
 const splitJa = (t: string) => (t || "").replace(/\s+\n/g, "\n").trim().split(JA_SENT_SPLIT).map(s=>s.trim()).filter(Boolean);
 const politeEnd = (s: string) => /(です|ます)(?:。|$)/.test(s);
 const nounStop = (s: string) => /[。！？]?$/.test(s) && !/(です|ます)(?:。|$)/.test(s);
-
 function readability(text: string) {
   const ss = splitJa(text);
   const n = ss.length || 1;
@@ -60,7 +90,7 @@ function readability(text: string) {
   };
 }
 
-/* ========= types from /api/review ========= */
+/* ========= types ========= */
 type CheckIssue = {
   id: string;
   label: string;
@@ -71,7 +101,7 @@ type CheckIssue = {
   message: string;
 };
 
-/* ========= highlight renderer ========= */
+/* ========= highlight renderer（違反箇所） ========= */
 function renderWithHighlights(text: string, issues: CheckIssue[]) {
   if (!text) return "";
   if (!issues?.length) return escapeHtml(text).replace(/\n/g, "<br/>");
@@ -88,8 +118,10 @@ function renderWithHighlights(text: string, issues: CheckIssue[]) {
   for (const g of segs) {
     if (g.s > cur) out.push(escapeHtml(text.slice(cur, g.s)));
     const frag = escapeHtml(text.slice(g.s, g.e));
+    const tip = escapeAttr(g.tip);
     out.push(
-      `<span class="underline decoration-red-400 decoration-2 underline-offset-[3px] text-red-700" title="${escapeHtml(g.tip)}">${frag}</span>`
+      `<span class="underline decoration-red-400 decoration-2 underline-offset-[3px] text-red-700"
+              data-tip="${tip}">${frag}</span>`
     );
     cur = g.e;
   }
@@ -127,13 +159,25 @@ type Stage = "idle" | "generating" | "generated" | "checking" | "checked" | "pol
 function StageBadge({label, active, done}:{label:string; active?:boolean; done?:boolean}) {
   return (
     <span className={cn(
-      "px-2 py-0.5 rounded-full text-xs border transition",
+      "px-2 py-0.5 rounded-full text-xs border transition whitespace-nowrap",
       done ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
       active ? "bg-yellow-50 text-yellow-700 border-yellow-200" :
                "bg-neutral-50 text-neutral-600 border-neutral-200"
     )}>
       {label}{done ? " ✔" : active ? " …" : ""}
     </span>
+  );
+}
+
+/* ========= Snack（mobile tips） ========= */
+function Snack({text, onClose}:{text:string; onClose:()=>void}) {
+  useEffect(() => { const t = setTimeout(onClose, 2600); return () => clearTimeout(t); }, [onClose]);
+  return (
+    <div className="fixed left-1/2 -translate-x-1/2 bottom-4 z-50">
+      <div className="px-3 py-2 text-[12px] rounded-lg bg-black/80 text-white shadow">
+        {text}
+      </div>
+    </div>
   );
 }
 
@@ -177,6 +221,9 @@ export default function Page() {
   const [stage, setStage] = useState<Stage>("idle");
   const [polishNeeded, setPolishNeeded] = useState<boolean | null>(null); // null=未判定
 
+  /* 出力② 表示切替（違反 or 変更点） */
+  const [view2, setView2] = useState<"issues" | "diff">("issues");
+
   /* 読みやすさ */
   const r1 = useMemo(()=> readability(text1), [text1]);
   const r2 = useMemo(()=> readability(text2), [text2]);
@@ -184,6 +231,22 @@ export default function Page() {
 
   const validUrl = (s: string) => /^https?:\/\/\S+/i.test(String(s || "").trim());
   const currentText = text3 || text2 || text1;
+
+  /* Tooltip（PC用のカスタム） & Snack（モバイル） */
+  const [hoverTip, setHoverTip] = useState<string | null>(null);
+  const [hoverPos, setHoverPos] = useState<{x:number;y:number}>({x:0,y:0});
+  const [snack, setSnack] = useState<string | null>(null);
+  const tipClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const t = (e.target as HTMLElement).getAttribute("data-tip")
+          || (e.target as HTMLElement).getAttribute("data-old");
+    if (t) setSnack(t);
+  };
+  const tipMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const t = (e.target as HTMLElement).getAttribute("data-tip")
+          || (e.target as HTMLElement).getAttribute("data-old");
+    if (t) { setHoverTip(t); setHoverPos({x: e.clientX + 12, y: e.clientY + 12}); }
+    else   { setHoverTip(null); }
+  };
 
   /* 管理PIN */
   const [isAdmin, setIsAdmin] = useState(false);
@@ -219,6 +282,7 @@ export default function Page() {
     setCheckStatus("idle");
     setPolishNeeded(null);
     setStage("generating");
+    setView2("issues");
 
     try {
       if (!name.trim()) throw new Error("物件名を入力してください。");
@@ -281,7 +345,7 @@ export default function Page() {
       setIssues2(issues);
       setIssues2Structured(issuesStructuredBefore);
       setSummary2(summary);
-      setDiff12Html(markDiffRed(src, improved));
+      setDiff12Html(markDiffRed(src, improved)); // 左カラムの差分用
       setCheckStatus("done");
       setStage("checked");
 
@@ -319,8 +383,8 @@ export default function Page() {
       if (!res.ok) throw new Error(j?.error || "仕上げに失敗しました。");
 
       const improved = String(j?.improved ?? text2);
-      const issuesAfter = Array.isArray(j?.issues_after) ? j.issues_after : [];
-      const issuesStructuredAfter = Array.isArray(j?.issues_structured) ? j.issues_structured : [];
+      const issuesAfter = Array.isArray(j?.issues_after) ? j?.issues_after : [];
+      const issuesStructuredAfter = Array.isArray(j?.issues_structured) ? j?.issues_structured : [];
       const summary = j?.summary || (issuesAfter.length ? issuesAfter.join(" / ") : "");
 
       setText3(improved);
@@ -347,6 +411,7 @@ export default function Page() {
     setSummary2(""); setSummary3("");
     setError(null); setCheckStatus("idle");
     setPolishNeeded(null); setStage("idle");
+    setView2("issues");
   }
 
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch {} };
@@ -470,23 +535,23 @@ export default function Page() {
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
       <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b">
-        <div className="max-w-7xl mx-auto px-5 py-3 flex items-center justify-between gap-3">
-          <div className="text-lg font-semibold">マンション説明文作成</div>
-          <div className="flex items-center gap-2">
+        <div className="max-w-7xl mx-auto px-4 md:px-5 py-3 flex items-center justify-between gap-3">
+          <div className="text-base md:text-lg font-semibold">マンション説明文作成</div>
+          <div className="flex items-center gap-2 overflow-x-auto md:overflow-visible pr-1"
+               style={{ WebkitOverflowScrolling: "touch" }}>
             <StageBadge label="生成開始" active={stage==="generating"} done={stage!=="idle" && stage!=="generating"} />
             <StageBadge label="初回生成完了" active={stage==="generated"} done={stage!=="idle" && stage!=="generating" && stage!=="generated"} />
             <StageBadge label="自動チェック中" active={stage==="checking"} done={stage==="checked" || stage==="polishing" || stage==="finished"} />
             <StageBadge label="チェック完了" active={stage==="checked"} done={stage==="polishing" || stage==="finished"} />
             <StageBadge label="仕上げ中" active={stage==="polishing"} done={stage==="finished"} />
             <StageBadge label="完了" done={stage==="finished"} />
-
             {isAdmin ? (
               <>
-                <Button type="button" className="ml-2 px-2 py-1 text-xs" onClick={()=>setShowBulk(true)}>バルク生成</Button>
-                <Button type="button" color="orange" className="px-2 py-1 text-xs" onClick={adminLogout}>管理ログアウト</Button>
+                <Button type="button" className="ml-2 px-2 py-1 text-xs" onClick={()=>setShowBulk(true)}>バルク</Button>
+                <Button type="button" color="orange" className="px-2 py-1 text-xs" onClick={adminLogout}>ログアウト</Button>
               </>
             ) : (
-              <Button type="button" className="ml-2 px-2 py-1 text-xs" onClick={()=>setShowLogin(true)}>管理ログイン</Button>
+              <Button type="button" className="ml-2 px-2 py-1 text-xs" onClick={()=>setShowLogin(true)}>管理</Button>
             )}
           </div>
         </div>
@@ -498,7 +563,7 @@ export default function Page() {
              style={{ width: stage==="finished" ? "100%" : stage==="polishing" ? "85%" : stage==="checked" ? "70%" : stage==="checking" ? "55%" : stage==="generated" ? "40%" : stage==="generating" ? "20%" : "2%" }} />
       </div>
 
-      <main className="max-w-7xl mx-auto px-5 py-6 grid lg:grid-cols-[minmax(360px,500px)_1fr] gap-6">
+      <main className="max-w-7xl mx-auto px-4 md:px-5 py-6 grid grid-cols-1 lg:grid-cols-[minmax(360px,500px)_1fr] gap-6">
         {/* 左：入力 */}
         <form onSubmit={handleGenerate} className="space-y-4">
           <section className="bg-white rounded-2xl shadow p-4 space-y-3">
@@ -564,7 +629,7 @@ export default function Page() {
 
             {/* ステータス行 */}
             <div className="flex items-center justify-between rounded-xl border bg-neutral-50 px-3 py-2">
-              <div className="text-sm flex items-center gap-2">
+              <div className="text-xs md:text-sm flex items-center gap-2">
                 自動チェック（初回生成後に自動実行）
                 {polishNeeded === false && (
                   <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
@@ -607,14 +672,14 @@ export default function Page() {
         {/* 右：3出力 */}
         <section className="space-y-4">
           {/* 出力① */}
-          <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
+          <div className="bg-white rounded-2xl shadow min-h-[180px] md:min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
               <div className="text-sm font-medium">出力① 初回生成</div>
               <div className="flex items-center gap-2">
                 <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
                   読みやすさ {r1.grade}
                 </span>
-                <div className="text-[11px] text-neutral-500">{r1.detail}</div>
+                <div className="hidden md:block text-[11px] text-neutral-500">{r1.detail}</div>
                 <Button onClick={()=>copy(text1)} disabled={!text1}>コピー</Button>
               </div>
             </div>
@@ -625,43 +690,65 @@ export default function Page() {
             </div>
           </div>
 
-          {/* 出力②（違反インライン） */}
-          <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
+          {/* 出力②（切替：違反ハイライト or 変更点） */}
+          <div className="bg-white rounded-2xl shadow min-h-[180px] md:min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
-              <div className="text-sm font-medium">出力② 自動チェック結果（違反箇所は赤下線・ホバーで理由）</div>
+              <div className="text-sm font-medium">出力② 自動チェック結果</div>
               <div className="flex items-center gap-2">
-                <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
-                  読みやすさ {r2.grade}
-                </span>
-                <div className="text-[11px] text-neutral-500">{r2.detail}</div>
+                <div className="text-[11px] hidden md:block text-neutral-500">{r2.detail}</div>
+                <div className="text-[11px] px-1 py-0.5 rounded-lg border bg-neutral-50">
+                  <button
+                    className={cn("px-2 py-0.5 rounded", view2==="issues" ? "bg-white shadow" : "")}
+                    onClick={() => setView2("issues")}
+                    type="button"
+                  >違反</button>
+                  <button
+                    className={cn("px-2 py-0.5 rounded", view2==="diff" ? "bg-white shadow" : "")}
+                    onClick={() => setView2("diff")}
+                    type="button"
+                  >変更点</button>
+                </div>
                 <Button onClick={()=>copy(text2)} disabled={!text2}>コピー</Button>
               </div>
             </div>
             <div className="p-4 flex-1 overflow-auto">
-              {text2 ? (
+              {!text2 ? (
+                <div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>
+              ) : view2==="issues" ? (
                 <div
+                  onClick={tipClick}
+                  onMouseMove={tipMove}
+                  onMouseLeave={() => setHoverTip(null)}
                   className="text-[15px] leading-relaxed break-words hyphens-auto overflow-visible"
                   dangerouslySetInnerHTML={{ __html: renderWithHighlights(text2, issues2Structured) }}
                 />
-              ) : (<div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>)}
+              ) : (
+                <div
+                  onClick={tipClick}
+                  onMouseMove={tipMove}
+                  onMouseLeave={() => setHoverTip(null)}
+                  className="text-[15px] leading-relaxed break-words hyphens-auto overflow-visible"
+                  dangerouslySetInnerHTML={{ __html: diffInlineWithOld(text1, text2) }}
+                />
+              )}
             </div>
           </div>
 
           {/* 出力③（Polish後） */}
-          <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
+          <div className="bg-white rounded-2xl shadow min-h-[180px] md:min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
               <div className="text-sm font-medium">出力③ 仕上げ（Polish）</div>
               <div className="flex items-center gap-2">
-                <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
-                  読みやすさ {r3.grade}
-                </span>
-                <div className="text-[11px] text-neutral-500">{r3.detail}</div>
+                <div className="text-[11px] hidden md:block text-neutral-500">{r3.detail}</div>
                 <Button onClick={()=>copy(text3)} disabled={!text3}>コピー</Button>
               </div>
             </div>
             <div className="p-4 flex-1 overflow-auto">
               {text3 ? (
                 <div
+                  onClick={tipClick}
+                  onMouseMove={tipMove}
+                  onMouseLeave={() => setHoverTip(null)}
                   className="text-[15px] leading-relaxed break-words hyphens-auto overflow-visible"
                   dangerouslySetInnerHTML={{ __html: renderWithHighlights(text3, issues3Structured) }}
                 />
@@ -671,12 +758,24 @@ export default function Page() {
 
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
-              ※ <code>/api/describe</code> が初回文（①）を生成。<code>/api/review</code> がチェック（②）と仕上げ（③）を返します。
-              ②の違反は本文中でも赤い下線で確認できます（ホバーで理由）。
+              ※ PCはホバー、モバイルはタップで理由や“元文”が表示されます。②は「違反」表示と「変更点（赤＝追加/置換、ホバーで元文）」を切り替えできます。
             </div>
           </div>
         </section>
       </main>
+
+      {/* PC用の浮遊ツールチップ（折り返し＆最大幅） */}
+      {hoverTip && (
+        <div className="fixed z-50 pointer-events-none"
+             style={{ left: hoverPos.x, top: hoverPos.y }}>
+          <div className="max-w-[340px] whitespace-normal px-2 py-1 text-[12px] rounded bg-black/80 text-white shadow">
+            {hoverTip}
+          </div>
+        </div>
+      )}
+
+      {/* Snack（モバイルのタップ理由表示） */}
+      {snack && <Snack text={snack} onClose={()=>setSnack(null)} />}
 
       {/* ======= Bulk Dialog ======= */}
       {isAdmin && showBulk && (
