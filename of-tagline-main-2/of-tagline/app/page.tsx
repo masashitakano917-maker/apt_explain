@@ -349,26 +349,39 @@ export default function Page() {
   const bulkBusyRef = useRef(false);
 
   function loadCsvIntoRows() {
-    const rows = parseCsv(bulkText);
-    if (!rows.length) return setBulkRows([]);
-    const [head, ...body] = rows;
-    const h = head.map(s => s.toLowerCase());
-    const idx = {
-      name: h.indexOf("name"), url: h.indexOf("url"), tone: h.indexOf("tone"),
-      min: h.indexOf("min"), max: h.indexOf("max"), must: h.indexOf("mustwords"),
-    };
-    const items: BulkRow[] = body.map((r, k) => ({
-      id: k+1,
-      name: r[idx.name] || "",
-      url: r[idx.url] || "",
-      tone: (tones as readonly string[]).includes(r[idx.tone] as any) ? (r[idx.tone] as Tone) : "一般的",
-      min: Number(r[idx.min] || 450) || 450,
-      max: Number(r[idx.max] || 550) || 550,
-      must: r[idx.must] || "",
-      status: "idle",
-    })).filter(it => it.name && /^https?:\/\//i.test(it.url));
-    setBulkRows(items);
-  }
+  const rows = parseCsv(bulkText);
+  if (!rows.length) return setBulkRows([]);
+  const [head, ...body] = rows;
+  const h = head.map(s => s.toLowerCase());
+  const idx = {
+    name: h.indexOf("name"),
+    url:  h.indexOf("url"),
+    tone: h.indexOf("tone"),
+    min:  h.indexOf("min"),
+    max:  h.indexOf("max"),
+    must: h.indexOf("mustwords"),
+  };
+
+  const items: BulkRow[] = body
+    .map((r, k) => {
+      const item: BulkRow = {
+        id: k + 1,
+        name: r[idx.name] || "",
+        url:  r[idx.url]  || "",
+        tone: (tones as readonly string[]).includes(r[idx.tone] as any)
+          ? (r[idx.tone] as Tone)
+          : "一般的",
+        min:  Number(r[idx.min] || 450) || 450,
+        max:  Number(r[idx.max] || 550) || 550,
+        must: r[idx.must] || "",
+        status: "idle" as const, // ★ ここがポイント（リテラル固定）
+      };
+      return item;
+    })
+    .filter(it => it.name && /^https?:\/\//i.test(it.url));
+
+  setBulkRows(items);
+}
 
   async function runBulkQueue() {
     if (bulkBusyRef.current) return;
