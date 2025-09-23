@@ -21,7 +21,6 @@ function hardCapJa(s: string, max: number): string {
 
 const normMustWords = (src: unknown): string[] => {
   const s: string = Array.isArray(src) ? (src as unknown[]).map(String).join(" ") : String(src ?? "");
-  // 半角/全角スペース・カンマ・読点・改行・スラッシュで分割
   return s.split(/[ ,、\s\n\/]+/).map(w => w.trim()).filter(Boolean);
 };
 
@@ -78,7 +77,6 @@ const nounStopVariant = (s: string) => {
            .replace(/に位置しています。$/, "に位置。")
            .replace(/に配慮しています。$/, "に配慮。")
            .replace(/です。$/, "。")
-           // 汎用の「ます。」削除はNG。連用形欠落を避けるため、「〜ています。」のみ安全に常体へ。
            .replace(/(て|で)います。$/, "$1いる。");
   if (!/[。！？]$/.test(out)) out += "。";
   return out;
@@ -158,9 +156,44 @@ function scrubUnitSpecificRemainders(text: string): string {
   return t;
 }
 
+/* ---------- generic compliance fix（禁止/不当/商標の中立化） ---------- */
+const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function scrubGenericByIssues(text: string, issues: CheckIssue[]): string {
+  let out = text;
+  for (const i of issues) {
+    if (i.id.startsWith("unit-")) continue; // 住戸系は別ルートで対応
+    if (!i.excerpt) continue;
+    out = out.replace(new RegExp(escRe(i.excerpt), "g"), "");
+  }
+  // 代表的な語の微調整（文法崩れの緩和）
+  out = out.replace(/のの/g, "の").replace(/、、+/g, "、").replace(/。\s*。+/g, "。").replace(/\s{2,}/g, " ").trim();
+  return out;
+}
+
+async function rewriteForCompliance(openai: OpenAI, text: string, tone: string, style: string, min: number, max: number, issues: CheckIssue[]) {
+  const targets = Array.from(new Set(issues.filter(i => !i.id.startsWith("unit-")).map(i => i.excerpt).filter(Boolean))).slice(0, 30);
+  if (!targets.length) return text;
+  const r = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.1,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system",
+        content:
+          'Return ONLY {"rewritten": string}. (json)\n' +
+          "役割: 不動産広告の校正者。禁止用語/不当表示（優良・有利誤認/過度な強調/二重価格）や商標名を削除/中立化し、文として自然に繋ぐ。\n" +
+          `トーン:${tone}\nスタイル:\n${style}\n` +
+          `文字数:${min}〜${max}（全角）。事実の新規追加/誇張は禁止。価格/金額/電話番号/外部URLを出力しない。\n` +
+          `削除・中立化の対象語句例:\n- ${targets.join(" / ")}` },
+      { role: "user", content: JSON.stringify({ text }) }
+    ]
+  });
+  try { return String(JSON.parse(r.choices?.[0]?.message?.content || "{}")?.rewritten || text); }
+  catch { return text; }
+}
+
 /* ---------- phrase throttle & subject fix ---------- */
 function throttlePhrases(text: string): string {
-  // 同語の多用を和らげる（後発出現を順次言い換え）
   const buckets: Array<{ lex: RegExp; repls: string[]; maxKeep: number }> = [
     { lex: /整って(?:い)?ます?/g, repls: ["備わっています", "用意されています", "整備されています", "あります"], maxKeep: 1 },
     { lex: /整い/g,               repls: ["備え", "体制があり", "環境があり"], maxKeep: 1 },
@@ -192,9 +225,7 @@ function deTautologyAndSubjectFix(text: string): string {
 /* ---------- 壊れた語尾の応急修正 ---------- */
 function fixTruncatedEndings(text: string): string {
   return text
-    // 〜てい。/〜でい。 → 〜ている。/〜でいる。
     .replace(/(て|で)い。/g, "$1いる。")
-    // 〜し。 → 〜する。
     .replace(/し。/g, "する。");
 }
 
@@ -229,7 +260,6 @@ async function ensureLengthReview(opts: {
 }
 
 /* ---------- Polish（仕上げ） ---------- */
-/** 仕上げ（Polish）：冗長削減・接続改善・用字統一・軽微な言い換え（事実の新規追加や住戸特定の再導入は禁止） */
 async function polishText(openai: OpenAI, text: string, tone: string, style: string, min: number, max: number) {
   const sys =
     'Return ONLY {"polished": string, "notes": string[]}. (json)\n' +
@@ -335,12 +365,12 @@ export async function POST(req: Request) {
     improved = stripPriceAndSpaces(improved);
     improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE, request });
 
-    // ④ 文字数最終 & ⑤ リズム + 言い換え（未Polishでも自然に）
+    // ④ 文字数最終 & ⑤ リズム＋言い換え
     if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
     improved = deTautologyAndSubjectFix(improved);
     improved = throttlePhrases(improved);
     improved = enforceCadence(improved, tone);
-    improved = fixTruncatedEndings(improved); // ★語尾の欠落を補修
+    improved = fixTruncatedEndings(improved);
     if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
 
     // ⑥ チェック（Before：表示用）
@@ -349,8 +379,10 @@ export async function POST(req: Request) {
       ? issues_structured_before.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`)
       : issuesTextFromModel;
 
-    // ⑦ 住戸特定があれば自動修正（棟向けに再書き＋スクラブ）
+    // ⑦ 自動修正（住戸特定 → 一般の禁止/不当/商標）
     let auto_fixed = false;
+
+    // a) 住戸特定（buildingのみ）
     if (scope === "building" && needsUnitFix(issues_structured_before)) {
       auto_fixed = true;
       improved = await rewriteForBuilding(openai, improved, tone, STYLE_GUIDE, minChars, maxChars, issues_structured_before);
@@ -358,7 +390,27 @@ export async function POST(req: Request) {
       improved = deTautologyAndSubjectFix(improved);
       improved = throttlePhrases(improved);
       improved = enforceCadence(improved, tone);
-      improved = fixTruncatedEndings(improved); // ★
+      improved = fixTruncatedEndings(improved);
+      if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
+      if (countJa(improved) < minChars) {
+        improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
+      }
+    }
+
+    // b) 一般の禁止/不当/商標（例：「人気の」「新築同様」「ディズニーランド」等）
+    let issues_after_unit = checkText(improved, { scope });
+    const hasGenericViolations = issues_after_unit.some(i => !i.id.startsWith("unit-"));
+    if (hasGenericViolations) {
+      auto_fixed = true;
+      // まず機械的に該当語を除去（安全側）
+      improved = scrubGenericByIssues(improved, issues_after_unit);
+      // さらにモデルで自然な文へ接続・中立化
+      improved = await rewriteForCompliance(openai, improved, tone, STYLE_GUIDE, minChars, maxChars, issues_after_unit);
+      improved = stripPriceAndSpaces(improved);
+      improved = deTautologyAndSubjectFix(improved);
+      improved = throttlePhrases(improved);
+      improved = enforceCadence(improved, tone);
+      improved = fixTruncatedEndings(improved);
       if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
       if (countJa(improved) < minChars) {
         improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
@@ -369,7 +421,7 @@ export async function POST(req: Request) {
     const issues_structured_after_check: CheckIssue[] = checkText(improved, { scope });
     const issues_after: string[] = issues_structured_after_check.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`);
 
-    // ★ 中間テキスト（右の2枠目用）
+    // 中間テキスト（右の2枠目）
     const text_after_check = improved;
 
     // ⑨ 仕上げ（Polish）：違反が出たら採用しない
@@ -381,10 +433,11 @@ export async function POST(req: Request) {
       const { polished, notes } = await polishText(openai, improved, tone, STYLE_GUIDE, minChars, maxChars);
       let candidate = stripPriceAndSpaces(polished);
       candidate = scrubUnitSpecificRemainders(candidate);
+      candidate = scrubGenericByIssues(candidate, checkText(candidate, { scope })); // 念のため
       candidate = deTautologyAndSubjectFix(candidate);
       candidate = throttlePhrases(candidate);
       candidate = enforceCadence(candidate, tone);
-      candidate = fixTruncatedEndings(candidate); // ★
+      candidate = fixTruncatedEndings(candidate);
       if (countJa(candidate) > maxChars) candidate = hardCapJa(candidate, maxChars);
       if (countJa(candidate) < minChars) {
         candidate = await ensureLengthReview({ openai, draft: candidate, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
@@ -402,24 +455,19 @@ export async function POST(req: Request) {
     // ⑩ 最終チェック（念のため）
     const issues_structured_final: CheckIssue[] = checkText(improved, { scope });
 
-    // 互換：従来の `issues` は「Before」を返す（= 何がダメだったかが必ず見える）
     return new Response(JSON.stringify({
       ok: true,
-      // テキスト
-      improved,                 // 最終版（= Polish採用時はPolish、未採用ならAfter-Check）
-      text_after_check,         // 右の2枠目
-      text_after_polish,        // 右の3枠目（未採用なら null）
-      // チェック結果
-      issues: issues_before,    // 互換（= Before）
-      issues_before,            // 改善前の指摘
-      issues_after,             // 自動修正後（Polish前）の指摘
-      issues_structured_before, // 構造化（Before）
-      issues_structured: issues_structured_final, // 構造化（最終）
-      // フラグ
+      improved,                 // 最終版
+      text_after_check,         // 右②
+      text_after_polish,        // 右③（未採用なら null）
+      issues: issues_before,    // 互換（Before）
+      issues_before,
+      issues_after,             // After（Polish前）
+      issues_structured_before,
+      issues_structured: issues_structured_final,
       auto_fixed,
       polish_applied,
       polish_notes,
-      // サマリー
       summary: summary || (issuesTextFromModel.length ? issuesTextFromModel.join(" / ") : "")
     }), { status: 200, headers: { "content-type": "application/json" } });
 
