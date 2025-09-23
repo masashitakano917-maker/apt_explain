@@ -38,7 +38,7 @@ function markDiffRed(original: string, improved: string) {
 const JA_SENT_SPLIT = /(?<=[。！？\?])\s*(?=[^\s])/g;
 const splitJa = (t: string) => (t || "").replace(/\s+\n/g, "\n").trim().split(JA_SENT_SPLIT).map(s=>s.trim()).filter(Boolean);
 const politeEnd = (s: string) => /(です|ます)(?:。|$)/.test(s);
-const nounStop = (s: string) => /[。！？]?$/.test(s) && !/(です|ます)(?:。|$)/.test(s);
+const nounStop = (s: string) => /[。！？]?$/.test(s) && !/(です|ます)(?:。|$)/.test(s); // ざっくり
 
 function readability(text: string) {
   const ss = splitJa(text);
@@ -46,13 +46,18 @@ function readability(text: string) {
   const avg = ss.reduce((a, s) => a + jaLen(s), 0) / n;
   const pPolite = ss.filter(politeEnd).length / n;
   const pNoun = ss.filter(nounStop).length / n;
+
+  // よく使い過ぎる語の簡易スコア
   const repeats = ["整って", "整い", "提供", "採用", "実現", "可能", "快適"].reduce((acc, w) => {
     const m = text.match(new RegExp(w, "g"))?.length ?? 0;
-    return acc + Math.max(0, m - 2);
+    return acc + Math.max(0, m - 2); // 2回超過分をカウント
   }, 0);
-  let grade = "B";
+
+  // 簡易グレード
+  let grade: "A"|"B"|"C" = "B";
   if (avg <= 70 && pPolite >= 0.5 && pPolite <= 0.75 && pNoun <= 0.35 && repeats <= 2) grade = "A";
   if (avg > 95 || repeats >= 5) grade = "C";
+
   return {
     grade,
     detail: `敬体 ${(pPolite*100)|0}% / 名詞止め ${(pNoun*100)|0}% / 平均文長 ${avg.toFixed(0)}字 / 重複語 ${repeats}`,
@@ -71,7 +76,7 @@ type CheckIssue = {
   message: string;
 };
 
-/* ========= highlight renderer ========= */
+/* ========= highlight renderer ========= (title属性=標準ツールチップ) */
 function renderWithHighlights(text: string, issues: CheckIssue[]) {
   if (!text) return "";
   if (!issues?.length) return escapeHtml(text).replace(/\n/g, "<br/>");
@@ -100,30 +105,8 @@ type CheckStatus = "idle" | "running" | "done" | "error";
 const tones = ["上品・落ち着いた", "一般的", "親しみやすい"] as const;
 type Tone = typeof tones[number];
 
-/* ========= CSV parser (quote対応) ========= */
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let q = false;
-  for (let i=0;i<text.length;i++){
-    const c = text[i];
-    if (q) {
-      if (c === '"') {
-        if (text[i+1] === '"'){ cell += '"'; i++; }
-        else q = false;
-      } else cell += c;
-    } else {
-      if (c === '"') q = true;
-      else if (c === ",") { row.push(cell.trim()); cell = ""; }
-      else if (c === "\n" || c === "\r") {
-        if (cell || row.length) { row.push(cell.trim()); rows.push(row); row = []; cell = ""; }
-      } else cell += c;
-    }
-  }
-  if (cell || row.length) { row.push(cell.trim()); rows.push(row); }
-  return rows.filter(r => r.some(x => x));
-}
+/* 6段階ステップ */
+type Step = "idle" | "generating" | "gen_done" | "checking" | "check_done" | "polishing" | "done";
 
 /* ========= component ========= */
 export default function Page() {
@@ -144,6 +127,7 @@ export default function Page() {
   const [text1, setText1] = useState("");
   const [text2, setText2] = useState("");
   const [text3, setText3] = useState("");
+  const [polishNote, setPolishNote] = useState(""); // 「Polish不要（自動判断）」の表示
 
   /* 差分 */
   const [diff12Html, setDiff12Html] = useState("");
@@ -159,10 +143,12 @@ export default function Page() {
 
   const [checkStatus, setCheckStatus] = useState<CheckStatus>("idle");
 
-  /* 進捗（チップ） */
-  const done1 = !!text1;
-  const done2 = !!text2 && checkStatus === "done";
-  const done3 = !!text3;
+  /* ステップ進行 */
+  const [step, setStep] = useState<Step>("idle");
+  const stepActive = (s: Step) => {
+    const order: Step[] = ["idle","generating","gen_done","checking","check_done","polishing","done"];
+    return order.indexOf(step) >= order.indexOf(s);
+  };
 
   /* 読みやすさ */
   const r1 = useMemo(()=> readability(text1), [text1]);
@@ -172,38 +158,17 @@ export default function Page() {
   const validUrl = (s: string) => /^https?:\/\/\S+/i.test(String(s || "").trim());
   const currentText = text3 || text2 || text1;
 
-  /* ===== 管理ログイン（PIN） ===== */
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [showLogin, setShowLogin] = useState(false);
-  const [pinInput, setPinInput] = useState("");
-  useEffect(() => {
-    fetch("/api/admin/me").then(r => r.json()).then(j => setIsAdmin(!!j?.admin)).catch(()=>{});
-  }, []);
-  async function adminLogin() {
-    const r = await fetch("/api/admin/login", {
-      method: "POST",
-      headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ pin: pinInput })
-    });
-    if (r.ok) { setIsAdmin(true); setShowLogin(false); setPinInput(""); }
-    else { alert("PINが違います"); }
-  }
-  async function adminLogout() {
-    await fetch("/api/admin/logout", { method: "POST" });
-    setIsAdmin(false);
-  }
-
-  /* ------------ 生成（完了後に自動チェック） ------------ */
+  /* ------------ 生成（完了後に自動チェック→必要なら自動Polish） ------------ */
   async function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
 
-    // 新しい流れを開始 → リセット②③
-    setText1(""); setText2(""); setText3("");
+    // 新しい流れ → リセット
+    setText1(""); setText2(""); setText3(""); setPolishNote("");
     setDiff12Html(""); setDiff23Html("");
     setIssues2([]); setIssues3([]); setIssues2Structured([]); setIssues3Structured([]);
     setSummary2(""); setSummary3("");
-    setCheckStatus("idle");
+    setCheckStatus("idle"); setStep("generating");
 
     try {
       if (!name.trim()) throw new Error("物件名を入力してください。");
@@ -221,12 +186,13 @@ export default function Page() {
       if (!r0.ok) throw new Error(j0?.error || "生成に失敗しました。");
       const generated = String(j0?.text || "");
       setText1(generated);
+      setStep("gen_done");
 
       // ② 自動チェック
-      await handleCheck(generated, /*busy抑制*/ true);
+      await handleCheck(generated, /*suppressBusy*/ true);
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
-      setCheckStatus("error");
+      setCheckStatus("error"); setStep("idle");
     } finally {
       setBusy(false);
     }
@@ -239,7 +205,7 @@ export default function Page() {
       if (!src) throw new Error("まず①の文章を生成してください。");
       if (!suppressBusy) setBusy(true);
 
-      setCheckStatus("running");
+      setCheckStatus("running"); setStep("checking");
       setIssues2([]); setSummary2(""); setDiff12Html(""); setIssues2Structured([]);
 
       const res = await fetch("/api/review", {
@@ -256,29 +222,40 @@ export default function Page() {
       const issues = Array.isArray(j?.issues) ? j.issues : [];
       const summary = j?.summary || (issues.length ? issues.join(" / ") : "");
       const issuesStructuredBefore = Array.isArray(j?.issues_structured_before) ? j.issues_structured_before : [];
+      const issuesStructuredAfter  = Array.isArray(j?.issues_structured) ? j.issues_structured : [];
 
       setText2(improved);
       setIssues2(issues);
-      setIssues2Structured(issuesStructuredBefore);
+      setIssues2Structured(issuesStructuredBefore.length ? issuesStructuredBefore : issuesStructuredAfter);
       setSummary2(summary);
       setDiff12Html(markDiffRed(src, improved));
-      setCheckStatus("done");
+      setCheckStatus("done"); setStep("check_done");
+
+      // 自動Polishの要否判定：違反が残る or 読みやすさがAでない
+      const needPolish = (issuesStructuredAfter.length > 0) || readability(improved).grade !== "A";
+
+      if (needPolish) {
+        await handlePolish(/*auto*/true);
+      } else {
+        setPolishNote("Polish不要（自動判断）");
+        setStep("done");
+      }
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
-      setCheckStatus("error");
+      setCheckStatus("error"); setStep("idle");
     } finally {
       if (!suppressBusy) setBusy(false);
     }
   }
 
-  /* ------------ 仕上げ（Polish=③, 自動トリガー可能） ------------ */
-  async function handlePolish() {
+  /* ------------ 仕上げ（③） ------------ */
+  async function handlePolish(auto = false) {
     setError(null);
     setIssues3([]); setSummary3(""); setDiff23Html(""); setIssues3Structured([]);
     try {
       if (!text2.trim()) throw new Error("まず②のチェックを完了してください。");
 
-      setBusy(true);
+      setBusy(true); setStep("polishing");
       const res = await fetch("/api/review", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -290,8 +267,8 @@ export default function Page() {
       if (!res.ok) throw new Error(j?.error || "仕上げに失敗しました。");
 
       const improved = String(j?.improved ?? text2);
-      const issuesAfter = Array.isArray(j?.issues_after) ? j?.issues_after : [];
-      const issuesStructuredAfter = Array.isArray(j?.issues_structured) ? j?.issues_structured : [];
+      const issuesAfter = Array.isArray(j?.issues_after) ? j.issues_after : [];
+      const issuesStructuredAfter = Array.isArray(j?.issues_structured) ? j.issues_structured : [];
       const summary = j?.summary || (issuesAfter.length ? issuesAfter.join(" / ") : "");
 
       setText3(improved);
@@ -299,8 +276,11 @@ export default function Page() {
       setIssues3Structured(issuesStructuredAfter);
       setSummary3(summary);
       setDiff23Html(markDiffRed(text2, improved));
+      setPolishNote(""); setStep("done");
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
+      if (auto) setPolishNote("Polish自動実行に失敗しました（手動実行してください）");
+      setStep("check_done");
     } finally {
       setBusy(false);
     }
@@ -310,16 +290,24 @@ export default function Page() {
   function handleReset() {
     setName(""); setUrl(""); setMustInput("");
     setTone("上品・落ち着いた"); setMinChars(450); setMaxChars(550);
-    setText1(""); setText2(""); setText3("");
+    setText1(""); setText2(""); setText3(""); setPolishNote("");
     setDiff12Html(""); setDiff23Html("");
     setIssues2([]); setIssues3([]); setIssues2Structured([]); setIssues3Structured([]);
     setSummary2(""); setSummary3("");
-    setError(null); setCheckStatus("idle");
+    setError(null); setCheckStatus("idle"); setStep("idle");
   }
 
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch {} };
 
-  /* ステータス表示 */
+  /* ステータスバッジ */
+  const StepChip = ({label, active}:{label:string;active:boolean}) => (
+    <span className={cn(
+      "px-2 py-0.5 rounded-full text-xs border whitespace-nowrap",
+      active ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-neutral-50 text-neutral-600 border-neutral-200"
+    )}>{label}{active ? " ✔" : ""}</span>
+  );
+
+  /* 自動チェックの表示 */
   const statusLabel =
     checkStatus === "running" ? "実行中…" :
     checkStatus === "done"    ? "完了" :
@@ -329,147 +317,33 @@ export default function Page() {
     checkStatus === "done"    ? "bg-emerald-100 text-emerald-700" :
     checkStatus === "error"   ? "bg-red-100 text-red-700" : "bg-neutral-100 text-neutral-600";
 
-  /* ========= Bulk（管理者のみ表示） ========= */
-  type BulkRow = {
-    id: number;
-    name: string; url: string; tone: Tone;
-    min: number; max: number; must: string;
-    status: "idle"|"running"|"ok"|"error";
-    out1?: string; out2?: string; out3?: string;
-    issues2?: string[]; issues3?: string[];
-  };
-  const [showBulk, setShowBulk] = useState(false);
-  const [bulkText, setBulkText] = useState("name,url,tone,min,max,mustWords\n");
-  const [bulkRows, setBulkRows] = useState<BulkRow[]>([]);
-  const bulkBusyRef = useRef(false);
-
-  function loadCsvIntoRows() {
-    const rows = parseCsv(bulkText);
-    if (!rows.length) return setBulkRows([]);
-    const [head, ...body] = rows;
-    const h = head.map(s => s.toLowerCase());
-    const idx = {
-      name: h.indexOf("name"),
-      url:  h.indexOf("url"),
-      tone: h.indexOf("tone"),
-      min:  h.indexOf("min"),
-      max:  h.indexOf("max"),
-      must: h.indexOf("mustwords"),
-    };
-    const items: BulkRow[] = body
-      .map((r, k) => {
-        const item: BulkRow = {
-          id: k + 1,
-          name: r[idx.name] || "",
-          url:  r[idx.url]  || "",
-          tone: (tones as readonly string[]).includes(r[idx.tone] as any)
-            ? (r[idx.tone] as Tone)
-            : "一般的",
-          min:  Number(r[idx.min] || 450) || 450,
-          max:  Number(r[idx.max] || 550) || 550,
-          must: r[idx.must] || "",
-          status: "idle",
-        };
-        return item;
-      })
-      .filter(it => it.name && /^https?:\/\//i.test(it.url));
-    setBulkRows(items);
-  }
-
-  async function runBulkQueue() {
-    if (bulkBusyRef.current) return;
-    bulkBusyRef.current = true;
-    const rows = [...bulkRows];
-    for (let i=0;i<rows.length;i++){
-      rows[i].status = "running"; setBulkRows([...rows]);
-      try {
-        const r1 = await fetch("/api/describe", {
-          method:"POST", headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify({
-            name: rows[i].name, url: rows[i].url, tone: rows[i].tone,
-            minChars: rows[i].min, maxChars: rows[i].max, mustWords: rows[i].must
-          })
-        });
-        const j1 = await r1.json();
-        if (!r1.ok) throw new Error(j1?.error || "describe failed");
-        const t1 = String(j1?.text || "");
-
-        const r2 = await fetch("/api/review", {
-          method:"POST", headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify({
-            text: t1, name: rows[i].name, url: rows[i].url, tone: rows[i].tone,
-            minChars: rows[i].min, maxChars: rows[i].max, mustWords: rows[i].must, scope: "building"
-          })
-        });
-        const j2 = await r2.json();
-        if (!r2.ok) throw new Error(j2?.error || "review failed");
-
-        rows[i].out1 = t1;
-        rows[i].out2 = String(j2?.improved || "");
-        rows[i].out3 = String(j2?.improved || "");
-        rows[i].issues2 = Array.isArray(j2?.issues) ? j2.issues : [];
-        rows[i].issues3 = Array.isArray(j2?.issues_after) ? j2.issues_after : [];
-        rows[i].status = "ok";
-      } catch {
-        rows[i].status = "error";
-      }
-      setBulkRows([...rows]);
-    }
-    bulkBusyRef.current = false;
-  }
-
-  function exportBulkCsv() {
-    const head = ["name","url","tone","min","max","out1","out2","out3"].join(",");
-    const lines = bulkRows.map(r =>
-      [r.name, r.url, r.tone, r.min, r.max,
-       (r.out1||"").replace(/\n/g,"\\n"),
-       (r.out2||"").replace(/\n/g,"\\n"),
-       (r.out3||"").replace(/\n/g,"\\n")
-      ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(",")
-    );
-    const csv = [head, ...lines].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = "bulk_results.csv"; a.click();
-    URL.revokeObjectURL(url);
-  }
-
   /* ========= UI ========= */
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
       <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b">
         <div className="max-w-7xl mx-auto px-5 py-3 flex items-center justify-between gap-3">
           <div className="text-lg font-semibold">マンション説明文作成</div>
-          <div className="flex items-center gap-2">
-            <span className={cn("px-2 py-0.5 rounded-full text-xs border",
-              done1 ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-neutral-50 text-neutral-600 border-neutral-200")}>
-              ① 初回生成 {done1 ? "✔" : ""}
-            </span>
-            <span className={cn("px-2 py-0.5 rounded-full text-xs border",
-              done2 ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-neutral-50 text-neutral-600 border-neutral-200")}>
-              ② 自動チェック {done2 ? "✔" : ""}
-            </span>
-            <span className={cn("px-2 py-0.5 rounded-full text-xs border",
-              done3 ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-neutral-50 text-neutral-600 border-neutral-200")}>
-              ③ 仕上げ（Polish） {done3 ? "✔" : ""}
-            </span>
 
-            {isAdmin ? (
-              <>
-                <Button type="button" className="ml-2 text-xs px-3 py-1" onClick={()=>setShowBulk(true)}>バルク</Button>
-                <Button type="button" color="orange" className="text-xs px-3 py-1" onClick={adminLogout}>ログアウト</Button>
-              </>
-            ) : (
-              <Button type="button" className="ml-2 text-xs px-3 py-1" onClick={()=>setShowLogin(true)}>管理</Button>
-            )}
+          {/* 6段階ステータス */}
+          <div className="hidden md:flex items-center gap-2">
+            <StepChip label="生成開始"      active={stepActive("generating")} />
+            <StepChip label="初回生成完了"  active={stepActive("gen_done")} />
+            <StepChip label="自動チェック中" active={stepActive("checking")} />
+            <StepChip label="チェック完了"  active={stepActive("check_done")} />
+            <StepChip label="仕上げ中"      active={stepActive("polishing")} />
+            <StepChip label="完了"          active={stepActive("done")} />
+          </div>
+
+          {/* 管理ボタン（小さめ） */}
+          <div>
+            <Button type="button" className="text-xs px-2 py-1">管理</Button>
           </div>
         </div>
       </header>
 
-      {/* 進捗ライン */}
+      {/* 進行ライン */}
       <div className="bg-gradient-to-r from-emerald-500 via-yellow-400 to-neutral-200 h-1"
-           style={{ width: done3 ? "100%" : done2 ? "66%" : done1 ? "33%" : "4%" }} />
+           style={{ width: step === "done" ? "100%" : step === "polishing" ? "88%" : step === "check_done" ? "76%" : step === "checking" ? "64%" : step === "gen_done" ? "40%" : step === "generating" ? "20%" : "4%" }} />
 
       <main className="max-w-7xl mx-auto px-5 py-6 grid lg:grid-cols-[minmax(360px,500px)_1fr] gap-6">
         {/* 左カラム：入力 */}
@@ -532,57 +406,27 @@ export default function Page() {
             </div>
           </section>
 
-          {/* === チェック ＆ 仕上げ（1行レイアウト） === */}
+          {/* チェック＆仕上げ（常時表示 / 1行レイアウト / 注釈は見出し横に小さく） */}
           <section className="bg-white rounded-2xl shadow p-4 space-y-3">
-            <div className="text-sm font-medium">チェック＆仕上げ</div>
-
-            <div className="rounded-xl border bg-neutral-50 px-3">
-              <div className="flex items-center gap-2 whitespace-nowrap overflow-x-auto py-2">
-                <span className="text-xs text-neutral-600 shrink-0">
-                  自動チェック（初回生成後に自動実行）
-                </span>
-
-                <span className={cn("px-2 py-0.5 rounded-full text-xs shrink-0", statusClass)}>
-                  {statusLabel}
-                </span>
-
-                <span className="h-4 w-px bg-neutral-200 mx-1 shrink-0" />
-
-                <Button
-                  type="button"
-                  onClick={() => handleCheck()}
-                  disabled={busy || !text1}
-                  className="px-3 py-1 text-xs shrink-0"
-                >
-                  再実行
-                </Button>
-                <Button
-                  type="button"
-                  onClick={handlePolish}
-                  disabled={busy || !text2}
-                  className="px-3 py-1 text-xs shrink-0"
-                >
-                  仕上げ（Polish）
-                </Button>
-
-                <span className="ml-auto text-[11px] text-neutral-500 shrink-0">
-                  必要時のみ自動Polish / 右枠③へ反映
-                </span>
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-medium">
+                チェック＆仕上げ
+                <span className="ml-2 text-xs text-neutral-500">初回生成後に自動実行</span>
+              </div>
+              <div className="flex items-center gap-2 whitespace-nowrap">
+                <span className={cn("px-2 py-0.5 rounded-full text-xs", statusClass)}>{statusLabel}</span>
+                <Button type="button" onClick={()=>handleCheck()} disabled={busy || !text1} className="px-2 py-1 h-7 text-xs">再実行</Button>
+                <Button type="button" onClick={()=>handlePolish(false)} disabled={busy || !text2} className="px-2 py-1 h-7 text-xs">仕上げ</Button>
               </div>
             </div>
 
-            {(issues2.length > 0 || diff12Html) && (
+            {/* チェック要点（② Beforeリストを残す） */}
+            {(issues2.length > 0) && (
               <div className="space-y-2">
-                {issues2.length > 0 && (
-                  <ul className="text-sm list-disc pl-5 space-y-1">
-                    {issues2.map((it, i) => <li key={i}>{it}</li>)}
-                  </ul>
-                )}
+                <ul className="text-sm list-disc pl-5 space-y-1">
+                  {issues2.map((it, i) => <li key={i}>{it}</li>)}
+                </ul>
                 {!!summary2 && <div className="text-xs text-neutral-500">要約: {summary2}</div>}
-                {!!diff12Html && (
-                  <div className="border rounded-lg p-3 text-sm leading-relaxed"
-                       dangerouslySetInnerHTML={{ __html: diff12Html }} />
-                )}
               </div>
             )}
           </section>
@@ -598,7 +442,7 @@ export default function Page() {
                 <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
                   読みやすさ {r1.grade}
                 </span>
-                <div className="text-[11px] text-neutral-500">{r1.detail}</div>
+                <div className="hidden md:block text-[11px] text-neutral-500">{r1.detail}</div>
                 <Button onClick={()=>copy(text1)} disabled={!text1}>コピー</Button>
               </div>
             </div>
@@ -609,15 +453,15 @@ export default function Page() {
             </div>
           </div>
 
-          {/* 出力② */}
+          {/* 出力②（見出しをスッキリ / 本文は必要箇所に赤下線＋titleツールチップ） */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
-              <div className="text-sm font-medium">出力② 自動チェック結果（違反箇所は赤下線・ホバーで理由）</div>
+              <div className="text-sm font-medium">出力② 自動チェック結果</div>
               <div className="flex items-center gap-2">
                 <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
                   読みやすさ {r2.grade}
                 </span>
-                <div className="text-[11px] text-neutral-500">{r2.detail}</div>
+                <div className="hidden md:block text-[11px] text-neutral-500">{r2.detail}</div>
                 <Button onClick={()=>copy(text2)} disabled={!text2}>コピー</Button>
               </div>
             </div>
@@ -629,7 +473,7 @@ export default function Page() {
             </div>
           </div>
 
-          {/* 出力③ */}
+          {/* 出力③（Polish） */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
               <div className="text-sm font-medium">出力③ 仕上げ（Polish）</div>
@@ -637,106 +481,30 @@ export default function Page() {
                 <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
                   読みやすさ {r3.grade}
                 </span>
-                <div className="text-[11px] text-neutral-500">{r3.detail}</div>
+                <div className="hidden md:block text-[11px] text-neutral-500">{r3.detail}</div>
                 <Button onClick={()=>copy(text3)} disabled={!text3}>コピー</Button>
               </div>
             </div>
             <div className="p-4 flex-1 overflow-auto">
+              {polishNote && !text3 && (
+                <div className="text-neutral-500 text-sm">— {polishNote} —</div>
+              )}
               {text3 ? (
                 <div className="text-[15px] leading-relaxed"
                   dangerouslySetInnerHTML={{ __html: renderWithHighlights(text3, issues3Structured) }} />
-              ) : (<div className="text-neutral-500 text-sm">— まだPolish未実行 —</div>)}
+              ) : (!polishNote ? (
+                <div className="text-neutral-500 text-sm">— まだPolish未実行 —</div>
+              ) : null)}
             </div>
           </div>
 
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
-              ※ <code>/api/describe</code> が初回文（①）を生成。<code>/api/review</code> がチェック（②）と仕上げ（③）を返します。
-              ②の違反は本文中でも赤い下線で確認できます（ホバーで理由）。
+              ※ PCはホバー、モバイルは長押しで理由や“元文”が表示されます。○は「違反」表示、●は「変更点」（赤=追加/置換、ホバーで元文）。
             </div>
           </div>
         </section>
       </main>
-
-      {/* ======= Bulk Dialog（管理者のみ） ======= */}
-      {isAdmin && showBulk && (
-        <div className="fixed inset-0 bg-black/30 z-50 flex items-start md:items-center justify-center p-4" onClick={()=>setShowBulk(false)}>
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl overflow-hidden" onClick={(e)=>e.stopPropagation()}>
-            <div className="p-4 border-b flex items-center justify-between">
-              <div className="text-sm font-medium">バルク生成（CSV貼り付け）</div>
-              <Button onClick={()=>setShowBulk(false)}>閉じる</Button>
-            </div>
-            <div className="grid md:grid-cols-[1fr_1fr] gap-4 p-4">
-              <div className="space-y-2">
-                <div className="text-xs text-neutral-500">
-                  形式: <code>name,url,tone,min,max,mustWords</code>（1行1件、ヘッダ必須 / toneは「上品・落ち着いた」「一般的」「親しみやすい」）
-                </div>
-                <textarea className="border rounded-lg p-2 min-h-[220px] w/full"
-                  value={bulkText} onChange={(e)=>setBulkText(e.target.value)} />
-                <div className="flex gap-2">
-                  <Button onClick={loadCsvIntoRows}>読み込む</Button>
-                  <Button onClick={runBulkQueue} disabled={!bulkRows.length}>実行</Button>
-                  <Button onClick={exportBulkCsv} disabled={!bulkRows.length}>CSV書き出し</Button>
-                </div>
-              </div>
-              <div className="overflow-auto max-h-[320px] border rounded-lg">
-                <table className="min-w-full text-sm">
-                  <thead className="bg-neutral-50">
-                    <tr>
-                      <th className="px-2 py-1 text-left">#</th>
-                      <th className="px-2 py-1 text-left">物件名</th>
-                      <th className="px-2 py-1 text-left">進捗</th>
-                      <th className="px-2 py-1 text-left">結果</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {bulkRows.map(r => (
-                      <tr key={r.id} className="border-t">
-                        <td className="px-2 py-1">{r.id}</td>
-                        <td className="px-2 py-1">{r.name}</td>
-                        <td className="px-2 py-1">
-                          <span className={cn(
-                            "px-2 py-0.5 rounded-full text-[11px] border",
-                            r.status==="idle" && "bg-neutral-50 text-neutral-600 border-neutral-200",
-                            r.status==="running" && "bg-yellow-50 text-yellow-700 border-yellow-200",
-                            r.status==="ok" && "bg-emerald-50 text-emerald-700 border-emerald-200",
-                            r.status==="error" && "bg-red-50 text-red-700 border-red-200"
-                          )}>{r.status}</span>
-                        </td>
-                        <td className="px-2 py-1">
-                          {r.out2 ? <span className="text-neutral-500">② {jaLen(r.out2)}字 / ③ {jaLen(r.out3||"")}字</span> : "-"}
-                        </td>
-                      </tr>
-                    ))}
-                    {!bulkRows.length && (
-                      <tr><td colSpan={4} className="px-2 py-6 text-center text-neutral-400">読み込まれた行がありません</td></tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-            <div className="p-3 border-t text-xs text-neutral-500">
-              チップ: 1行に数千文字を入れるとブラウザが重くなります。100件以上は分割推奨。
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ======= 管理ログイン（PIN） ======= */}
-      {!isAdmin && showLogin && (
-        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onClick={()=>setShowLogin(false)}>
-          <div className="bg-white rounded-2xl shadow-xl p-4 w-full max-w-sm" onClick={(e)=>e.stopPropagation()}>
-            <div className="text-sm font-medium mb-2">管理ログイン</div>
-            <input type="password" className="border rounded-lg p-2 w-full" placeholder="運営PIN"
-              value={pinInput} onChange={(e)=>setPinInput(e.target.value)} />
-            <div className="mt-3 flex gap-2 justify-end">
-              <Button onClick={()=>setShowLogin(false)} color="orange">閉じる</Button>
-              <Button onClick={adminLogin} disabled={!pinInput.trim()}>ログイン</Button>
-            </div>
-            <div className="mt-2 text-xs text-neutral-500">※ 運営専用。PINはサーバー側で検証され、ブラウザに保存されません。</div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
