@@ -15,9 +15,10 @@ const escapeHtml = (s: string) =>
     .replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 const escapeAttr = (s: string) =>
-  String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  String(s ?? "")
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/\n/g," "); // ★ 改行→空白に
 
-/** LCSベース差分：挿入/置換を赤で表示し、data-old に“元文”を格納（まとめて1塊） */
+/** LCS差分：赤（data-old=元文）で一括表示・ホバーで元文 */
 function diffInlineWithOld(original: string, improved: string) {
   const A = Array.from(original || "");
   const B = Array.from(improved || "");
@@ -28,12 +29,12 @@ function diffInlineWithOld(original: string, improved: string) {
 
   const out: string[] = [];
   let i = 0, j = 0;
-  let delBuf = ""; // 直前の削除（元文）
-  let insBuf = ""; // 追加（新文）
+  let delBuf = ""; // 旧文
+  let insBuf = ""; // 新文
 
   const flushIns = () => {
     if (!insBuf) return;
-    const tip = delBuf ? `元文: ${delBuf}` : "新たに追加";
+    const tip = delBuf ? `元文: ${delBuf}` : "新規追加";
     out.push(
       `<span class="text-red-600 bg-red-50 rounded-[2px] px-0.5"
               data-old="${escapeAttr(tip)}">${escapeHtml(insBuf)}</span>`
@@ -42,30 +43,21 @@ function diffInlineWithOld(original: string, improved: string) {
   };
 
   while (i < n && j < m) {
-    if (A[i] === B[j]) {
-      flushIns();
-      out.push(escapeHtml(B[j])); i++; j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      // A側の削除（=元文） → 直後の挿入/置換にぶら下げる
-      delBuf += A[i++]; 
-    } else {
-      // B側の挿入（=新文）
-      insBuf += B[j++];
-    }
+    if (A[i] === B[j]) { flushIns(); out.push(escapeHtml(B[j])); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { delBuf += A[i++]; }
+    else { insBuf += B[j++]; }
   }
-  // 残り
   while (j < m) insBuf += B[j++];
   flushIns();
-  // 末尾に削除だけ残った場合は表示しない（純削除は赤にしない方針）
   return out.join("");
 }
 
-/** 差分（①→②/②→③用）: 赤で新規/変更部分のみ（旧: markDiffRed の代替表示用） */
+/** markDiff 互換（赤の差分のみ） */
 function markDiffRed(original: string, improved: string) {
   return diffInlineWithOld(original, improved);
 }
 
-/* ========= readability meter ========= */
+/* ========= readability ========= */
 const JA_SENT_SPLIT = /(?<=[。！？\?])\s*(?=[^\s])/g;
 const splitJa = (t: string) => (t || "").replace(/\s+\n/g, "\n").trim().split(JA_SENT_SPLIT).map(s=>s.trim()).filter(Boolean);
 const politeEnd = (s: string) => /(です|ます)(?:。|$)/.test(s);
@@ -85,8 +77,7 @@ function readability(text: string) {
   if (avg > 95 || repeats >= 5) grade = "C";
   return {
     grade,
-    detail: `敬体 ${(pPolite*100)|0}% / 名詞止め ${(pNoun*100)|0}% / 平均文長 ${avg.toFixed(0)}字 / 重複語 ${repeats}`,
-    numbers: { pPolite, pNoun, avg, repeats }
+    detail: `敬体 ${(pPolite*100)|0}% / 名詞止め ${(pNoun*100)|0}% / 平均文長 ${avg.toFixed(0)}字 / 重複語 ${repeats}`
   };
 }
 
@@ -101,7 +92,7 @@ type CheckIssue = {
   message: string;
 };
 
-/* ========= highlight renderer（違反箇所） ========= */
+/* ========= highlight renderer（違反箇所ツールチップ） ========= */
 function renderWithHighlights(text: string, issues: CheckIssue[]) {
   if (!text) return "";
   if (!issues?.length) return escapeHtml(text).replace(/\n/g, "<br/>");
@@ -118,7 +109,7 @@ function renderWithHighlights(text: string, issues: CheckIssue[]) {
   for (const g of segs) {
     if (g.s > cur) out.push(escapeHtml(text.slice(cur, g.s)));
     const frag = escapeHtml(text.slice(g.s, g.e));
-    const tip = escapeAttr(g.tip);
+    const tip = escapeAttr(g.tip); // ★ 改行を空白化済
     out.push(
       `<span class="underline decoration-red-400 decoration-2 underline-offset-[3px] text-red-700"
               data-tip="${tip}">${frag}</span>`
@@ -129,32 +120,28 @@ function renderWithHighlights(text: string, issues: CheckIssue[]) {
   return out.join("").replace(/\n/g, "<br/>");
 }
 
-/* ========= CSV parser ========= */
+/* ========= CSV ========= */
 function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
-  let cell = "";
-  let q = false;
+  let cell = ""; let q = false;
   for (let i=0;i<text.length;i++){
     const c = text[i];
     if (q) {
-      if (c === '"') {
-        if (text[i+1] === '"'){ cell += '"'; i++; }
-        else q = false;
-      } else cell += c;
+      if (c === '"') { if (text[i+1] === '"'){ cell += '"'; i++; } else q = false; }
+      else cell += c;
     } else {
       if (c === '"') q = true;
       else if (c === ",") { row.push(cell.trim()); cell = ""; }
-      else if (c === "\n" || c === "\r") {
-        if (cell || row.length) { row.push(cell.trim()); rows.push(row); row = []; cell = ""; }
-      } else cell += c;
+      else if (c === "\n" || c === "\r") { if (cell || row.length) { row.push(cell.trim()); rows.push(row); row = []; cell = ""; } }
+      else cell += c;
     }
   }
   if (cell || row.length) { row.push(cell.trim()); rows.push(row); }
   return rows.filter(r => r.some(x => x));
 }
 
-/* ========= Stage badges ========= */
+/* ========= stage badges ========= */
 type Stage = "idle" | "generating" | "generated" | "checking" | "checked" | "polishing" | "finished";
 function StageBadge({label, active, done}:{label:string; active?:boolean; done?:boolean}) {
   return (
@@ -169,7 +156,7 @@ function StageBadge({label, active, done}:{label:string; active?:boolean; done?:
   );
 }
 
-/* ========= Snack（mobile tips） ========= */
+/* ========= Snack（mobile tip） ========= */
 function Snack({text, onClose}:{text:string; onClose:()=>void}) {
   useEffect(() => { const t = setTimeout(onClose, 2600); return () => clearTimeout(t); }, [onClose]);
   return (
@@ -181,47 +168,35 @@ function Snack({text, onClose}:{text:string; onClose:()=>void}) {
   );
 }
 
-/* ========= page component ========= */
+/* ========= page ========= */
 const tones = ["上品・落ち着いた", "一般的", "親しみやすい"] as const;
 type Tone = typeof tones[number];
 type CheckStatus = "idle" | "running" | "done" | "error";
 
 export default function Page() {
   /* 入力 */
-  const [name, setName] = useState("");
-  const [url, setUrl] = useState("");
-  const [mustInput, setMustInput] = useState("");
-  const mustWords = useMemo(() => parseWords(mustInput), [mustInput]);
-
+  const [name, setName] = useState(""); const [url, setUrl] = useState("");
+  const [mustInput, setMustInput] = useState(""); const mustWords = useMemo(()=>parseWords(mustInput),[mustInput]);
   const [tone, setTone] = useState<Tone>("上品・落ち着いた");
-  const [minChars, setMinChars] = useState(450);
-  const [maxChars, setMaxChars] = useState(550);
+  const [minChars, setMinChars] = useState(450); const [maxChars, setMaxChars] = useState(550);
 
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
 
   /* 出力①②③ */
-  const [text1, setText1] = useState("");
-  const [text2, setText2] = useState("");
-  const [text3, setText3] = useState("");
-
-  /* 差分 */
-  const [diff12Html, setDiff12Html] = useState("");
-  const [diff23Html, setDiff23Html] = useState("");
+  const [text1, setText1] = useState(""); const [text2, setText2] = useState(""); const [text3, setText3] = useState("");
+  const [diff12Html, setDiff12Html] = useState(""); const [diff23Html, setDiff23Html] = useState("");
 
   /* 検出（構造化） */
   const [issues2Structured, setIssues2Structured] = useState<CheckIssue[]>([]);
   const [issues3Structured, setIssues3Structured] = useState<CheckIssue[]>([]);
-  const [issues2, setIssues2] = useState<string[]>([]);
-  const [issues3, setIssues3] = useState<string[]>([]);
-  const [summary2, setSummary2] = useState("");
-  const [summary3, setSummary3] = useState("");
+  const [issues2, setIssues2] = useState<string[]>([]); const [issues3, setIssues3] = useState<string[]>([]);
+  const [summary2, setSummary2] = useState(""); const [summary3, setSummary3] = useState("");
 
   const [checkStatus, setCheckStatus] = useState<CheckStatus>("idle");
   const [stage, setStage] = useState<Stage>("idle");
-  const [polishNeeded, setPolishNeeded] = useState<boolean | null>(null); // null=未判定
+  const [polishNeeded, setPolishNeeded] = useState<boolean | null>(null);
 
-  /* 出力② 表示切替（違反 or 変更点） */
+  /* 出力② 表示切替 */
   const [view2, setView2] = useState<"issues" | "diff">("issues");
 
   /* 読みやすさ */
@@ -232,7 +207,7 @@ export default function Page() {
   const validUrl = (s: string) => /^https?:\/\/\S+/i.test(String(s || "").trim());
   const currentText = text3 || text2 || text1;
 
-  /* Tooltip（PC用のカスタム） & Snack（モバイル） */
+  /* Tooltip / Snack */
   const [hoverTip, setHoverTip] = useState<string | null>(null);
   const [hoverPos, setHoverPos] = useState<{x:number;y:number}>({x:0,y:0});
   const [snack, setSnack] = useState<string | null>(null);
@@ -242,8 +217,8 @@ export default function Page() {
     if (t) setSnack(t);
   };
   const tipMove = (e: React.MouseEvent<HTMLDivElement>) => {
-    const t = (e.target as HTMLElement).getAttribute("data-tip")
-          || (e.target as HTMLElement).getAttribute("data-old");
+    const el = e.target as HTMLElement;
+    const t = el.getAttribute("data-tip") || el.getAttribute("data-old");
     if (t) { setHoverTip(t); setHoverPos({x: e.clientX + 12, y: e.clientY + 12}); }
     else   { setHoverTip(null); }
   };
@@ -252,37 +227,23 @@ export default function Page() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
   const [pinInput, setPinInput] = useState("");
-  useEffect(() => {
-    fetch("/api/admin/me").then(r => r.json()).then(j => setIsAdmin(!!j?.admin)).catch(()=>{});
-  }, []);
+  useEffect(() => { fetch("/api/admin/me").then(r=>r.json()).then(j=>setIsAdmin(!!j?.admin)).catch(()=>{}); }, []);
   async function adminLogin() {
-    const r = await fetch("/api/admin/login", {
-      method: "POST",
-      headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ pin: pinInput })
-    });
-    if (r.ok) { setIsAdmin(true); setShowLogin(false); setPinInput(""); }
-    else { alert("PINが違います"); }
+    const r = await fetch("/api/admin/login", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ pin: pinInput }) });
+    if (r.ok) { setIsAdmin(true); setShowLogin(false); setPinInput(""); } else { alert("PINが違います"); }
   }
-  async function adminLogout() {
-    await fetch("/api/admin/logout", { method: "POST" });
-    setIsAdmin(false);
-  }
+  async function adminLogout() { await fetch("/api/admin/logout", { method:"POST" }); setIsAdmin(false); }
 
   /* ========== 生成（完了後に自動チェック） ========== */
   async function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-
     // リセット
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
     setIssues2([]); setIssues3([]); setIssues2Structured([]); setIssues3Structured([]);
     setSummary2(""); setSummary3("");
-    setCheckStatus("idle");
-    setPolishNeeded(null);
-    setStage("generating");
-    setView2("issues");
+    setCheckStatus("idle"); setPolishNeeded(null); setStage("generating"); setView2("issues");
 
     try {
       if (!name.trim()) throw new Error("物件名を入力してください。");
@@ -303,14 +264,10 @@ export default function Page() {
       setStage("generated");
 
       // ② 自動チェック
-      await handleCheck(generated, /*busy抑制*/ true);
+      await handleCheck(generated, true);
     } catch (err: any) {
-      setError(err?.message || "エラーが発生しました。");
-      setCheckStatus("error");
-      setStage("idle");
-    } finally {
-      setBusy(false);
-    }
+      setError(err?.message || "エラーが発生しました。"); setCheckStatus("error"); setStage("idle");
+    } finally { setBusy(false); }
   }
 
   /* ========== チェック（②） ========== */
@@ -320,16 +277,12 @@ export default function Page() {
       if (!src) throw new Error("まず①の文章を生成してください。");
       if (!suppressBusy) setBusy(true);
 
-      setStage("checking");
-      setCheckStatus("running");
+      setStage("checking"); setCheckStatus("running");
       setIssues2([]); setSummary2(""); setDiff12Html(""); setIssues2Structured([]);
 
       const res = await fetch("/api/review", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: src, name, url, mustWords: mustInput, tone, minChars, maxChars,
-          scope: "building"
-        }),
+        body: JSON.stringify({ text: src, name, url, mustWords: mustInput, tone, minChars, maxChars, scope: "building" }),
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j?.error || "チェックに失敗しました。");
@@ -338,27 +291,27 @@ export default function Page() {
       const issues = Array.isArray(j?.issues) ? j.issues : [];
       const summary = j?.summary || (issues.length ? issues.join(" / ") : "");
       const issuesStructuredBefore = Array.isArray(j?.issues_structured_before) ? j.issues_structured_before : [];
-      const issuesStructuredAfter = Array.isArray(j?.issues_structured) ? j.issues_structured : [];
+      const issuesStructuredAfter  = Array.isArray(j?.issues_structured) ? j.issues_structured : [];
       const autoFixed = !!j?.auto_fixed;
 
       setText2(improved);
-      setIssues2(issues);
-      setIssues2Structured(issuesStructuredBefore);
+      setIssues2(issues); setIssues2Structured(issuesStructuredBefore);
       setSummary2(summary);
-      setDiff12Html(markDiffRed(src, improved)); // 左カラムの差分用
-      setCheckStatus("done");
-      setStage("checked");
+      setDiff12Html(markDiffRed(src, improved));
+      setCheckStatus("done"); setStage("checked");
 
       const need = issuesStructuredBefore.length > 0 || autoFixed || issuesStructuredAfter.length > 0;
       setPolishNeeded(need);
-      if (!need) setStage("finished");
+
+      // ★ Polish自動実行
+      if (need) {
+        await handlePolish();
+      } else {
+        setStage("finished");
+      }
     } catch (err: any) {
-      setError(err?.message || "エラーが発生しました。");
-      setCheckStatus("error");
-      setStage("idle");
-    } finally {
-      if (!suppressBusy) setBusy(false);
-    }
+      setError(err?.message || "エラーが発生しました。"); setCheckStatus("error"); setStage("idle");
+    } finally { if (!suppressBusy) setBusy(false); }
   }
 
   /* ========== 仕上げ（③） ========== */
@@ -369,15 +322,11 @@ export default function Page() {
       if (!text2.trim()) throw new Error("まず②のチェックを完了してください。");
       if (polishNeeded === false) return;
 
-      setBusy(true);
-      setStage("polishing");
+      setBusy(true); setStage("polishing");
 
       const res = await fetch("/api/review", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: text2, name, url, mustWords: mustInput, tone, minChars, maxChars,
-          scope: "building"
-        }),
+        body: JSON.stringify({ text: text2, name, url, mustWords: mustInput, tone, minChars, maxChars, scope: "building" }),
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j?.error || "仕上げに失敗しました。");
@@ -388,17 +337,13 @@ export default function Page() {
       const summary = j?.summary || (issuesAfter.length ? issuesAfter.join(" / ") : "");
 
       setText3(improved);
-      setIssues3(issuesAfter);
-      setIssues3Structured(issuesStructuredAfter);
+      setIssues3(issuesAfter); setIssues3Structured(issuesStructuredAfter);
       setSummary3(summary);
       setDiff23Html(markDiffRed(text2, improved));
       setStage("finished");
     } catch (err: any) {
-      setError(err?.message || "エラーが発生しました。");
-      setStage("checked");
-    } finally {
-      setBusy(false);
-    }
+      setError(err?.message || "エラーが発生しました。"); setStage("checked");
+    } finally { setBusy(false); }
   }
 
   /* ========== リセット ========== */
@@ -409,9 +354,7 @@ export default function Page() {
     setDiff12Html(""); setDiff23Html("");
     setIssues2([]); setIssues3([]); setIssues2Structured([]); setIssues3Structured([]);
     setSummary2(""); setSummary3("");
-    setError(null); setCheckStatus("idle");
-    setPolishNeeded(null); setStage("idle");
-    setView2("issues");
+    setError(null); setCheckStatus("idle"); setPolishNeeded(null); setStage("idle"); setView2("issues");
   }
 
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch {} };
@@ -427,8 +370,7 @@ export default function Page() {
 
   /* ========= Bulk（管理者のみ） ========= */
   type BulkRow = {
-    id: number;
-    name: string; url: string; tone: Tone;
+    id: number; name: string; url: string; tone: Tone;
     min: number; max: number; must: string;
     status: "idle"|"running"|"ok"|"error";
     out1?: string; out2?: string; out3?: string;
@@ -444,30 +386,15 @@ export default function Page() {
     if (!rows.length) return setBulkRows([]);
     const [head, ...body] = rows;
     const h = head.map(s => s.toLowerCase());
-    const idx = {
-      name: h.indexOf("name"),
-      url:  h.indexOf("url"),
-      tone: h.indexOf("tone"),
-      min:  h.indexOf("min"),
-      max:  h.indexOf("max"),
-      must: h.indexOf("mustwords"),
-    };
+    const idx = { name: h.indexOf("name"), url: h.indexOf("url"), tone: h.indexOf("tone"), min: h.indexOf("min"), max: h.indexOf("max"), must: h.indexOf("mustwords") };
     const items: BulkRow[] = body
-      .map((r, k) => {
-        const item: BulkRow = {
-          id: k + 1,
-          name: r[idx.name] || "",
-          url:  r[idx.url]  || "",
-          tone: (tones as readonly string[]).includes(r[idx.tone] as any)
-            ? (r[idx.tone] as Tone)
-            : "一般的",
-          min:  Number(r[idx.min] || 450) || 450,
-          max:  Number(r[idx.max] || 550) || 550,
-          must: r[idx.must] || "",
-          status: "idle" as const,
-        };
-        return item;
-      })
+      .map((r, k) => ({
+        id: k+1,
+        name: r[idx.name] || "", url: r[idx.url] || "",
+        tone: (["上品・落ち着いた","一般的","親しみやすい"] as const).includes(r[idx.tone] as any) ? (r[idx.tone] as Tone) : "一般的",
+        min: Number(r[idx.min] || 450) || 450, max: Number(r[idx.max] || 550) || 550,
+        must: r[idx.must] || "", status: "idle" as const,
+      }))
       .filter(it => it.name && /^https?:\/\//i.test(it.url));
     setBulkRows(items);
   }
@@ -481,24 +408,16 @@ export default function Page() {
       try {
         const r1 = await fetch("/api/describe", {
           method:"POST", headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify({
-            name: rows[i].name, url: rows[i].url, tone: rows[i].tone,
-            minChars: rows[i].min, maxChars: rows[i].max, mustWords: rows[i].must
-          })
+          body: JSON.stringify({ name: rows[i].name, url: rows[i].url, tone: rows[i].tone, minChars: rows[i].min, maxChars: rows[i].max, mustWords: rows[i].must })
         });
-        const j1 = await r1.json();
-        if (!r1.ok) throw new Error(j1?.error || "describe failed");
+        const j1 = await r1.json(); if (!r1.ok) throw new Error(j1?.error || "describe failed");
         const t1 = String(j1?.text || "");
 
         const r2 = await fetch("/api/review", {
           method:"POST", headers:{ "Content-Type":"application/json" },
-          body: JSON.stringify({
-            text: t1, name: rows[i].name, url: rows[i].url, tone: rows[i].tone,
-            minChars: rows[i].min, maxChars: rows[i].max, mustWords: rows[i].must, scope: "building"
-          })
+          body: JSON.stringify({ text: t1, name: rows[i].name, url: rows[i].url, tone: rows[i].tone, minChars: rows[i].min, maxChars: rows[i].max, mustWords: rows[i].must, scope: "building" })
         });
-        const j2 = await r2.json();
-        if (!r2.ok) throw new Error(j2?.error || "review failed");
+        const j2 = await r2.json(); if (!r2.ok) throw new Error(j2?.error || "review failed");
 
         rows[i].out1 = t1;
         rows[i].out2 = String(j2?.improved || "");
@@ -506,9 +425,7 @@ export default function Page() {
         rows[i].issues2 = Array.isArray(j2?.issues) ? j2.issues : [];
         rows[i].issues3 = Array.isArray(j2?.issues_after) ? j2.issues_after : [];
         rows[i].status = "ok";
-      } catch {
-        rows[i].status = "error";
-      }
+      } catch { rows[i].status = "error"; }
       setBulkRows([...rows]);
     }
     bulkBusyRef.current = false;
@@ -526,8 +443,7 @@ export default function Page() {
     const csv = [head, ...lines].join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = "bulk_results.csv"; a.click();
+    const a = document.createElement("a"); a.href = url; a.download = "bulk_results.csv"; a.click();
     URL.revokeObjectURL(url);
   }
 
@@ -537,8 +453,7 @@ export default function Page() {
       <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b">
         <div className="max-w-7xl mx-auto px-4 md:px-5 py-3 flex items-center justify-between gap-3">
           <div className="text-base md:text-lg font-semibold">マンション説明文作成</div>
-          <div className="flex items-center gap-2 overflow-x-auto md:overflow-visible pr-1"
-               style={{ WebkitOverflowScrolling: "touch" }}>
+          <div className="flex items-center gap-2 overflow-x-auto md:overflow-visible pr-1" style={{ WebkitOverflowScrolling: "touch" }}>
             <StageBadge label="生成開始" active={stage==="generating"} done={stage!=="idle" && stage!=="generating"} />
             <StageBadge label="初回生成完了" active={stage==="generated"} done={stage!=="idle" && stage!=="generating" && stage!=="generated"} />
             <StageBadge label="自動チェック中" active={stage==="checking"} done={stage==="checked" || stage==="polishing" || stage==="finished"} />
@@ -613,11 +528,9 @@ export default function Page() {
                 </div>
               </div>
 
-              <div className="flex gap-3">
-                <Button type="submit" disabled={busy || !name || !url}>
-                  {busy && checkStatus !== "running" ? "処理中…" : "文章を生成"}
-                </Button>
-                <Button type="button" color="orange" onClick={handleReset}>リセット</Button>
+              <div className="flex gap-2 flex-wrap">
+                <Button type="submit" disabled={busy || !name || !url} className="px-3 py-1.5 text-sm">文章を生成</Button>
+                <Button type="button" color="orange" onClick={handleReset} className="px-3 py-1.5 text-sm">リセット</Button>
               </div>
 
               {error && <div className="text-sm text-red-600">{error}</div>}
@@ -627,27 +540,21 @@ export default function Page() {
           <section className="bg-white rounded-2xl shadow p-4 space-y-3">
             <div className="text-sm font-medium">チェック &amp; 仕上げ</div>
 
-            {/* ステータス行 */}
+            {/* ステータス行（小型ボタン化） */}
             <div className="flex items-center justify-between rounded-xl border bg-neutral-50 px-3 py-2">
               <div className="text-xs md:text-sm flex items-center gap-2">
                 自動チェック（初回生成後に自動実行）
                 {polishNeeded === false && (
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                    Polish不要（適合あり）
-                  </span>
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">Polish不要（適合あり）</span>
                 )}
                 {polishNeeded === true && (
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-orange-50 text-orange-700 border border-orange-200">
-                    Polish推奨（違反あり）
-                  </span>
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-orange-50 text-orange-700 border border-orange-200">Polish推奨（違反あり）</span>
                 )}
               </div>
-              <div className="flex items-center gap-2">
-                <span className={cn("px-2 py-0.5 rounded-full text-xs", statusClass)}>{statusLabel}</span>
-                <Button type="button" onClick={()=>handleCheck()} disabled={busy || !text1} className="px-3 py-1 text-xs">再実行</Button>
-                <Button type="button" onClick={handlePolish} disabled={busy || !text2 || polishNeeded===false} className="px-3 py-1 text-xs">
-                  仕上げ（Polish）
-                </Button>
+              <div className="flex items-center gap-1">
+                <span className={cn("px-2 py-0.5 rounded-full text-[11px]", statusClass)}>{statusLabel}</span>
+                <Button type="button" onClick={()=>handleCheck()} disabled={busy || !text1} className="px-2.5 py-1 text-xs">再実行</Button>
+                <Button type="button" onClick={handlePolish} disabled={busy || !text2 || polishNeeded===false} className="px-2.5 py-1 text-xs">仕上げ</Button>
               </div>
             </div>
 
@@ -655,58 +562,43 @@ export default function Page() {
             {(issues2.length > 0 || diff12Html) && (
               <div className="space-y-2">
                 {issues2.length > 0 && (
-                  <ul className="text-sm list-disc pl-5 space-y-1">
-                    {issues2.map((it, i) => <li key={i}>{it}</li>)}
-                  </ul>
+                  <ul className="text-sm list-disc pl-5 space-y-1">{issues2.map((it, i) => <li key={i}>{it}</li>)}</ul>
                 )}
                 {!!summary2 && <div className="text-xs text-neutral-500">要約: {summary2}</div>}
                 {!!diff12Html && (
-                  <div className="border rounded-lg p-3 text-sm leading-relaxed"
-                       dangerouslySetInnerHTML={{ __html: diff12Html }} />
+                  <div className="border rounded-lg p-3 text-sm leading-relaxed" dangerouslySetInnerHTML={{ __html: diffInlineWithOld(text1, text2) }} />
                 )}
               </div>
             )}
           </section>
         </form>
 
-        {/* 右：3出力 */}
+        {/* 右：出力 ①②③ */}
         <section className="space-y-4">
           {/* 出力① */}
           <div className="bg-white rounded-2xl shadow min-h-[180px] md:min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
               <div className="text-sm font-medium">出力① 初回生成</div>
               <div className="flex items-center gap-2">
-                <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
-                  読みやすさ {r1.grade}
-                </span>
+                <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">読みやすさ {r1.grade}</span>
                 <div className="hidden md:block text-[11px] text-neutral-500">{r1.detail}</div>
                 <Button onClick={()=>copy(text1)} disabled={!text1}>コピー</Button>
               </div>
             </div>
             <div className="p-4 flex-1 overflow-auto">
-              {text1 ? (
-                <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text1}</p>
-              ) : (<div className="text-neutral-500 text-sm">— 未生成 —</div>)}
+              {text1 ? <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text1}</p> : <div className="text-neutral-500 text-sm">— 未生成 —</div>}
             </div>
           </div>
 
-          {/* 出力②（切替：違反ハイライト or 変更点） */}
+          {/* 出力②（切替） */}
           <div className="bg-white rounded-2xl shadow min-h-[180px] md:min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
               <div className="text-sm font-medium">出力② 自動チェック結果</div>
               <div className="flex items-center gap-2">
                 <div className="text-[11px] hidden md:block text-neutral-500">{r2.detail}</div>
                 <div className="text-[11px] px-1 py-0.5 rounded-lg border bg-neutral-50">
-                  <button
-                    className={cn("px-2 py-0.5 rounded", view2==="issues" ? "bg-white shadow" : "")}
-                    onClick={() => setView2("issues")}
-                    type="button"
-                  >違反</button>
-                  <button
-                    className={cn("px-2 py-0.5 rounded", view2==="diff" ? "bg-white shadow" : "")}
-                    onClick={() => setView2("diff")}
-                    type="button"
-                  >変更点</button>
+                  <button className={cn("px-2 py-0.5 rounded", view2==="issues" ? "bg-white shadow" : "")} onClick={()=>setView2("issues")} type="button">違反</button>
+                  <button className={cn("px-2 py-0.5 rounded", view2==="diff" ? "bg-white shadow" : "")} onClick={()=>setView2("diff")} type="button">変更点</button>
                 </div>
                 <Button onClick={()=>copy(text2)} disabled={!text2}>コピー</Button>
               </div>
@@ -716,17 +608,13 @@ export default function Page() {
                 <div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>
               ) : view2==="issues" ? (
                 <div
-                  onClick={tipClick}
-                  onMouseMove={tipMove}
-                  onMouseLeave={() => setHoverTip(null)}
+                  onClick={tipClick} onMouseMove={tipMove} onMouseLeave={()=>setHoverTip(null)}
                   className="text-[15px] leading-relaxed break-words hyphens-auto overflow-visible"
                   dangerouslySetInnerHTML={{ __html: renderWithHighlights(text2, issues2Structured) }}
                 />
               ) : (
                 <div
-                  onClick={tipClick}
-                  onMouseMove={tipMove}
-                  onMouseLeave={() => setHoverTip(null)}
+                  onClick={tipClick} onMouseMove={tipMove} onMouseLeave={()=>setHoverTip(null)}
                   className="text-[15px] leading-relaxed break-words hyphens-auto overflow-visible"
                   dangerouslySetInnerHTML={{ __html: diffInlineWithOld(text1, text2) }}
                 />
@@ -734,7 +622,7 @@ export default function Page() {
             </div>
           </div>
 
-          {/* 出力③（Polish後） */}
+          {/* 出力③ */}
           <div className="bg-white rounded-2xl shadow min-h-[180px] md:min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
               <div className="text-sm font-medium">出力③ 仕上げ（Polish）</div>
@@ -746,9 +634,7 @@ export default function Page() {
             <div className="p-4 flex-1 overflow-auto">
               {text3 ? (
                 <div
-                  onClick={tipClick}
-                  onMouseMove={tipMove}
-                  onMouseLeave={() => setHoverTip(null)}
+                  onClick={tipClick} onMouseMove={tipMove} onMouseLeave={()=>setHoverTip(null)}
                   className="text-[15px] leading-relaxed break-words hyphens-auto overflow-visible"
                   dangerouslySetInnerHTML={{ __html: renderWithHighlights(text3, issues3Structured) }}
                 />
@@ -758,26 +644,24 @@ export default function Page() {
 
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
-              ※ PCはホバー、モバイルはタップで理由や“元文”が表示されます。②は「違反」表示と「変更点（赤＝追加/置換、ホバーで元文）」を切り替えできます。
+              ※ PCはホバー、モバイルはタップで理由や“元文”が表示されます。②は「違反」表示と「変更点（赤＝追加/置換、ホバーで元文）」を切替できます。
             </div>
           </div>
         </section>
       </main>
 
-      {/* PC用の浮遊ツールチップ（折り返し＆最大幅） */}
+      {/* 浮遊ツールチップ（PC） */}
       {hoverTip && (
-        <div className="fixed z-50 pointer-events-none"
-             style={{ left: hoverPos.x, top: hoverPos.y }}>
+        <div className="fixed z-50 pointer-events-none" style={{ left: hoverPos.x, top: hoverPos.y }}>
           <div className="max-w-[340px] whitespace-normal px-2 py-1 text-[12px] rounded bg-black/80 text-white shadow">
             {hoverTip}
           </div>
         </div>
       )}
-
-      {/* Snack（モバイルのタップ理由表示） */}
+      {/* Snack（モバイル） */}
       {snack && <Snack text={snack} onClose={()=>setSnack(null)} />}
 
-      {/* ======= Bulk Dialog ======= */}
+      {/* ===== Bulk Dialog ===== */}
       {isAdmin && showBulk && (
         <div className="fixed inset-0 bg-black/30 z-50 flex items-start md:items-center justify-center p-4" onClick={()=>setShowBulk(false)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl overflow-hidden" onClick={(e)=>e.stopPropagation()}>
@@ -790,8 +674,7 @@ export default function Page() {
                 <div className="text-xs text-neutral-500">
                   形式: <code>name,url,tone,min,max,mustWords</code>（1行1件、ヘッダ必須 / toneは「上品・落ち着いた」「一般的」「親しみやすい」）
                 </div>
-                <textarea className="border rounded-lg p-2 min-h-[220px] w-full"
-                  value={bulkText} onChange={(e)=>setBulkText(e.target.value)} />
+                <textarea className="border rounded-lg p-2 min-h-[220px] w-full" value={bulkText} onChange={(e)=>setBulkText(e.target.value)} />
                 <div className="flex gap-2">
                   <Button onClick={loadCsvIntoRows}>読み込む</Button>
                   <Button onClick={runBulkQueue} disabled={!bulkRows.length}>実行</Button>
@@ -801,12 +684,7 @@ export default function Page() {
               <div className="overflow-auto max-h-[320px] border rounded-lg">
                 <table className="min-w-full text-sm">
                   <thead className="bg-neutral-50">
-                    <tr>
-                      <th className="px-2 py-1 text-left">#</th>
-                      <th className="px-2 py-1 text-left">物件名</th>
-                      <th className="px-2 py-1 text-left">進捗</th>
-                      <th className="px-2 py-1 text-left">結果</th>
-                    </tr>
+                    <tr><th className="px-2 py-1 text-left">#</th><th className="px-2 py-1 text-left">物件名</th><th className="px-2 py-1 text-left">進捗</th><th className="px-2 py-1 text-left">結果</th></tr>
                   </thead>
                   <tbody>
                     {bulkRows.map(r => (
@@ -822,32 +700,25 @@ export default function Page() {
                             r.status==="error" && "bg-red-50 text-red-700 border-red-200"
                           )}>{r.status}</span>
                         </td>
-                        <td className="px-2 py-1">
-                          {r.out2 ? <span className="text-neutral-500">② {jaLen(r.out2)}字 / ③ {jaLen(r.out3||"")}字</span> : "-"}
-                        </td>
+                        <td className="px-2 py-1">{r.out2 ? <span className="text-neutral-500">② {jaLen(r.out2)}字 / ③ {jaLen(r.out3||"")}字</span> : "-"}</td>
                       </tr>
                     ))}
-                    {!bulkRows.length && (
-                      <tr><td colSpan={4} className="px-2 py-6 text-center text-neutral-400">読み込まれた行がありません</td></tr>
-                    )}
+                    {!bulkRows.length && (<tr><td colSpan={4} className="px-2 py-6 text-center text-neutral-400">読み込まれた行がありません</td></tr>)}
                   </tbody>
                 </table>
               </div>
             </div>
-            <div className="p-3 border-t text-xs text-neutral-500">
-              チップ: 1行に数千文字を入れるとブラウザが重くなります。100件以上は分割推奨。
-            </div>
+            <div className="p-3 border-t text-xs text-neutral-500">チップ: 大量行は分割推奨。</div>
           </div>
         </div>
       )}
 
-      {/* ======= 管理ログイン（PIN） ======= */}
+      {/* ===== 管理ログイン（PIN） ===== */}
       {!isAdmin && showLogin && (
         <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" onClick={()=>setShowLogin(false)}>
           <div className="bg-white rounded-2xl shadow-xl p-4 w-full max-w-sm" onClick={(e)=>e.stopPropagation()}>
             <div className="text-sm font-medium mb-2">管理ログイン</div>
-            <input type="password" className="border rounded-lg p-2 w-full" placeholder="運営PIN"
-              value={pinInput} onChange={(e)=>setPinInput(e.target.value)} />
+            <input type="password" className="border rounded-lg p-2 w-full" placeholder="運営PIN" value={pinInput} onChange={(e)=>setPinInput(e.target.value)} />
             <div className="mt-3 flex gap-2 justify-end">
               <Button onClick={()=>setShowLogin(false)} color="orange" className="px-2 py-1 text-xs">閉じる</Button>
               <Button onClick={adminLogin} disabled={!pinInput.trim()} className="px-2 py-1 text-xs">ログイン</Button>
