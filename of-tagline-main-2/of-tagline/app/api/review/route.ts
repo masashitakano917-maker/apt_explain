@@ -77,7 +77,9 @@ const nounStopVariant = (s: string) => {
            .replace(/を備えています。$/, "を備える。")
            .replace(/に位置しています。$/, "に位置。")
            .replace(/に配慮しています。$/, "に配慮。")
-           .replace(/です。$/, "。").replace(/ます。$/, "。");
+           .replace(/です。$/, "。")
+           // 汎用の「ます。」削除はNG。連用形欠落を避けるため、「〜ています。」のみ安全に常体へ。
+           .replace(/(て|で)います。$/, "$1いる。");
   if (!/[。！？]$/.test(out)) out += "。";
   return out;
 };
@@ -185,6 +187,15 @@ function deTautologyAndSubjectFix(text: string): string {
     .replace(/総戸数は(\d+)戸を誇ります/g, "総戸数は$1戸です")
     .replace(/理想的/g, "快適")
     .replace(/\s{2,}/g, " ");
+}
+
+/* ---------- 壊れた語尾の応急修正 ---------- */
+function fixTruncatedEndings(text: string): string {
+  return text
+    // 〜てい。/〜でい。 → 〜ている。/〜でいる。
+    .replace(/(て|で)い。/g, "$1いる。")
+    // 〜し。 → 〜する。
+    .replace(/し。/g, "する。");
 }
 
 /** 文字数調整（最大3回） */
@@ -329,6 +340,7 @@ export async function POST(req: Request) {
     improved = deTautologyAndSubjectFix(improved);
     improved = throttlePhrases(improved);
     improved = enforceCadence(improved, tone);
+    improved = fixTruncatedEndings(improved); // ★語尾の欠落を補修
     if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
 
     // ⑥ チェック（Before：表示用）
@@ -346,6 +358,7 @@ export async function POST(req: Request) {
       improved = deTautologyAndSubjectFix(improved);
       improved = throttlePhrases(improved);
       improved = enforceCadence(improved, tone);
+      improved = fixTruncatedEndings(improved); // ★
       if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
       if (countJa(improved) < minChars) {
         improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
@@ -371,6 +384,7 @@ export async function POST(req: Request) {
       candidate = deTautologyAndSubjectFix(candidate);
       candidate = throttlePhrases(candidate);
       candidate = enforceCadence(candidate, tone);
+      candidate = fixTruncatedEndings(candidate); // ★
       if (countJa(candidate) > maxChars) candidate = hardCapJa(candidate, maxChars);
       if (countJa(candidate) < minChars) {
         candidate = await ensureLengthReview({ openai, draft: candidate, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
