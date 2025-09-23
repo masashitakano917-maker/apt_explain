@@ -705,8 +705,8 @@ export default function Page() {
             </div>
             <div className="p-4 flex-1 overflow-auto">
               {text2 ? (
-                <div className="text-[15px] leading-relaxed"
-                  dangerouslySetInnerHTML={{ __html: renderWithHighlights(text2, issues2Structured) }} />
+                <div className="text-[15px] leading-relaxed break-words hyphens-auto"
+    dangerouslySetInnerHTML={{ __html: renderWithHighlights(text2, issues2Structured) }} />
               ) : (<div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>)}
             </div>
           </div>
@@ -728,9 +728,8 @@ export default function Page() {
             </div>
             <div className="p-4 flex-1 overflow-auto">
               {text3 ? (
-                <div className="text-[15px] leading-relaxed"
-                  dangerouslySetInnerHTML={{ __html: renderWithHighlights(text3, issues3Structured) }} />
-              ) : (<div className="text-neutral-500 text-sm">— まだPolish未実行 —</div>)}
+<div className="text-[15px] leading-relaxed break-words hyphens-auto"
+    dangerouslySetInnerHTML={{ __html: renderWithHighlights(text3, issues3Structured) }} />
             </div>
           </div>
 
