@@ -156,6 +156,37 @@ function scrubUnitSpecificRemainders(text: string): string {
   return t;
 }
 
+/* ---------- phrase throttle & subject fix ---------- */
+function throttlePhrases(text: string): string {
+  // 同語の多用を和らげる（後発出現を順次言い換え）
+  const buckets: Array<{ lex: RegExp; repls: string[]; maxKeep: number }> = [
+    { lex: /整って(?:い)?ます?/g, repls: ["備わっています", "用意されています", "整備されています", "あります"], maxKeep: 1 },
+    { lex: /整い/g,               repls: ["備え", "体制があり", "環境があり"], maxKeep: 1 },
+    { lex: /提供(?:し|して)います?/g, repls: ["設けています", "用意しています", "行っています"], maxKeep: 1 },
+    { lex: /採用(?:し|して)います?/g, repls: ["用いています", "取り入れています"], maxKeep: 1 },
+    { lex: /実現(?:し|して)います?/g, repls: ["かなえています", "形にしています"], maxKeep: 0 },
+  ];
+  let out = text;
+  for (const b of buckets) {
+    let m: RegExpExecArray | null;
+    const idxs: number[] = [];
+    const re = new RegExp(b.lex.source, "g");
+    while ((m = re.exec(out))) idxs.push(m.index);
+    if (idxs.length <= b.maxKeep) continue;
+    let used = 0, ri = 0;
+    out = out.replace(b.lex, (w) => (++used <= b.maxKeep) ? w : (b.repls[ri++ % b.repls.length]));
+  }
+  return out;
+}
+
+function deTautologyAndSubjectFix(text: string): string {
+  return text
+    .replace(/敷地は鉄筋コンクリート造/g, "建物は鉄筋コンクリート造")
+    .replace(/総戸数は(\d+)戸を誇ります/g, "総戸数は$1戸です")
+    .replace(/理想的/g, "快適")
+    .replace(/\s{2,}/g, " ");
+}
+
 /** 文字数調整（最大3回） */
 async function ensureLengthReview(opts: {
   openai: OpenAI; draft: string; min: number; max: number; tone: string; style: string; request?: string;
@@ -293,8 +324,10 @@ export async function POST(req: Request) {
     improved = stripPriceAndSpaces(improved);
     improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE, request });
 
-    // ④ 文字数最終 & ⑤ リズム
+    // ④ 文字数最終 & ⑤ リズム + 言い換え（未Polishでも自然に）
     if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
+    improved = deTautologyAndSubjectFix(improved);
+    improved = throttlePhrases(improved);
     improved = enforceCadence(improved, tone);
     if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
 
@@ -310,6 +343,8 @@ export async function POST(req: Request) {
       auto_fixed = true;
       improved = await rewriteForBuilding(openai, improved, tone, STYLE_GUIDE, minChars, maxChars, issues_structured_before);
       improved = scrubUnitSpecificRemainders(improved);
+      improved = deTautologyAndSubjectFix(improved);
+      improved = throttlePhrases(improved);
       improved = enforceCadence(improved, tone);
       if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
       if (countJa(improved) < minChars) {
@@ -333,6 +368,8 @@ export async function POST(req: Request) {
       const { polished, notes } = await polishText(openai, improved, tone, STYLE_GUIDE, minChars, maxChars);
       let candidate = stripPriceAndSpaces(polished);
       candidate = scrubUnitSpecificRemainders(candidate);
+      candidate = deTautologyAndSubjectFix(candidate);
+      candidate = throttlePhrases(candidate);
       candidate = enforceCadence(candidate, tone);
       if (countJa(candidate) > maxChars) candidate = hardCapJa(candidate, maxChars);
       if (countJa(candidate) < minChars) {
