@@ -15,7 +15,7 @@ const escapeHtml = (s: string) =>
     .replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
-/** LCSベースの差分（挿入/変更部分を <mark> 赤表示） */
+/** LCSベース差分（挿入/変更 = <mark>） */
 function markDiffRed(original: string, improved: string) {
   const A = Array.from(original || "");
   const B = Array.from(improved || "");
@@ -38,7 +38,7 @@ function markDiffRed(original: string, improved: string) {
 const JA_SENT_SPLIT = /(?<=[。！？\?])\s*(?=[^\s])/g;
 const splitJa = (t: string) => (t || "").replace(/\s+\n/g, "\n").trim().split(JA_SENT_SPLIT).map(s=>s.trim()).filter(Boolean);
 const politeEnd = (s: string) => /(です|ます)(?:。|$)/.test(s);
-const nounStop = (s: string) => /[。！？]?$/.test(s) && !/(です|ます)(?:。|$)/.test(s); // ざっくり
+const nounStop = (s: string) => /[。！？]?$/.test(s) && !/(です|ます)(?:。|$)/.test(s);
 
 function readability(text: string) {
   const ss = splitJa(text);
@@ -46,16 +46,13 @@ function readability(text: string) {
   const avg = ss.reduce((a, s) => a + jaLen(s), 0) / n;
   const pPolite = ss.filter(politeEnd).length / n;
   const pNoun = ss.filter(nounStop).length / n;
-
   const repeats = ["整って", "整い", "提供", "採用", "実現", "可能", "快適"].reduce((acc, w) => {
     const m = text.match(new RegExp(w, "g"))?.length ?? 0;
     return acc + Math.max(0, m - 2);
   }, 0);
-
   let grade = "B";
   if (avg <= 70 && pPolite >= 0.5 && pPolite <= 0.75 && pNoun <= 0.35 && repeats <= 2) grade = "A";
   if (avg > 95 || repeats >= 5) grade = "C";
-
   return {
     grade,
     detail: `敬体 ${(pPolite*100)|0}% / 名詞止め ${(pNoun*100)|0}% / 平均文長 ${avg.toFixed(0)}字 / 重複語 ${repeats}`,
@@ -78,12 +75,14 @@ type CheckIssue = {
 function renderWithHighlights(text: string, issues: CheckIssue[]) {
   if (!text) return "";
   if (!issues?.length) return escapeHtml(text).replace(/\n/g, "<br/>");
-
-  const segs: { s: number; e: number; tip: string }[] =
+  const segs =
     [...issues]
       .sort((a,b)=> a.start-b.start || b.end-a.end)
-      .map(i => ({ s: Math.max(0, i.start), e: Math.min(text.length, i.end), tip: `${i.category} / ${i.label}：${i.message}` }));
-
+      .map(i => ({
+        s: Math.max(0, i.start),
+        e: Math.min(text.length, i.end),
+        tip: `${i.category} / ${i.label}：${i.message}`
+      }));
   const out: string[] = [];
   let cur = 0;
   for (const g of segs) {
@@ -98,12 +97,7 @@ function renderWithHighlights(text: string, issues: CheckIssue[]) {
   return out.join("").replace(/\n/g, "<br/>");
 }
 
-/* ========= page state ========= */
-type CheckStatus = "idle" | "running" | "done" | "error";
-const tones = ["上品・落ち着いた", "一般的", "親しみやすい"] as const;
-type Tone = typeof tones[number];
-
-/* ========= CSV parser (quote対応) ========= */
+/* ========= CSV parser ========= */
 function parseCsv(text: string): string[][] {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -128,7 +122,7 @@ function parseCsv(text: string): string[][] {
   return rows.filter(r => r.some(x => x));
 }
 
-/* ========= UI helpers ========= */
+/* ========= Stage badges ========= */
 type Stage = "idle" | "generating" | "generated" | "checking" | "checked" | "polishing" | "finished";
 function StageBadge({label, active, done}:{label:string; active?:boolean; done?:boolean}) {
   return (
@@ -143,9 +137,13 @@ function StageBadge({label, active, done}:{label:string; active?:boolean; done?:
   );
 }
 
-/* ========= component ========= */
+/* ========= page component ========= */
+const tones = ["上品・落ち着いた", "一般的", "親しみやすい"] as const;
+type Tone = typeof tones[number];
+type CheckStatus = "idle" | "running" | "done" | "error";
+
 export default function Page() {
-  /* 単件入力 */
+  /* 入力 */
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [mustInput, setMustInput] = useState("");
@@ -187,7 +185,7 @@ export default function Page() {
   const validUrl = (s: string) => /^https?:\/\/\S+/i.test(String(s || "").trim());
   const currentText = text3 || text2 || text1;
 
-  /* ===== 管理ログイン（PIN） ===== */
+  /* 管理PIN */
   const [isAdmin, setIsAdmin] = useState(false);
   const [showLogin, setShowLogin] = useState(false);
   const [pinInput, setPinInput] = useState("");
@@ -208,7 +206,7 @@ export default function Page() {
     setIsAdmin(false);
   }
 
-  /* ------------ 生成（完了後に自動チェック） ------------ */
+  /* ========== 生成（完了後に自動チェック） ========== */
   async function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -251,7 +249,7 @@ export default function Page() {
     }
   }
 
-  /* ------------ チェック（②） ------------ */
+  /* ========== チェック（②） ========== */
   async function handleCheck(baseText?: string, suppressBusy = false) {
     try {
       const src = (baseText ?? text1).trim();
@@ -287,7 +285,6 @@ export default function Page() {
       setCheckStatus("done");
       setStage("checked");
 
-      // Polishの要否を判定（Beforeに違反が無く、モデルAutoFixも無し → 不要）
       const need = issuesStructuredBefore.length > 0 || autoFixed || issuesStructuredAfter.length > 0;
       setPolishNeeded(need);
       if (!need) setStage("finished");
@@ -300,13 +297,13 @@ export default function Page() {
     }
   }
 
-  /* ------------ 仕上げ（Polish=③） ------------ */
+  /* ========== 仕上げ（③） ========== */
   async function handlePolish() {
     setError(null);
     setIssues3([]); setSummary3(""); setDiff23Html(""); setIssues3Structured([]);
     try {
       if (!text2.trim()) throw new Error("まず②のチェックを完了してください。");
-      if (polishNeeded === false) return; // 不要なら無視
+      if (polishNeeded === false) return;
 
       setBusy(true);
       setStage("polishing");
@@ -340,7 +337,7 @@ export default function Page() {
     }
   }
 
-  /* ------------ クリア ------------ */
+  /* ========== リセット ========== */
   function handleReset() {
     setName(""); setUrl(""); setMustInput("");
     setTone("上品・落ち着いた"); setMinChars(450); setMaxChars(550);
@@ -354,7 +351,6 @@ export default function Page() {
 
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch {} };
 
-  /* ステータス表示 */
   const statusLabel =
     checkStatus === "running" ? "実行中…" :
     checkStatus === "done"    ? "完了" :
@@ -364,7 +360,7 @@ export default function Page() {
     checkStatus === "done"    ? "bg-emerald-100 text-emerald-700" :
     checkStatus === "error"   ? "bg-red-100 text-red-700" : "bg-neutral-100 text-neutral-600";
 
-  /* ========= Bulk（管理者のみ表示） ========= */
+  /* ========= Bulk（管理者のみ） ========= */
   type BulkRow = {
     id: number;
     name: string; url: string; tone: Tone;
@@ -477,7 +473,6 @@ export default function Page() {
         <div className="max-w-7xl mx-auto px-5 py-3 flex items-center justify-between gap-3">
           <div className="text-lg font-semibold">マンション説明文作成</div>
           <div className="flex items-center gap-2">
-            {/* 進捗チップ（タイムライン風） */}
             <StageBadge label="生成開始" active={stage==="generating"} done={stage!=="idle" && stage!=="generating"} />
             <StageBadge label="初回生成完了" active={stage==="generated"} done={stage!=="idle" && stage!=="generating" && stage!=="generated"} />
             <StageBadge label="自動チェック中" active={stage==="checking"} done={stage==="checked" || stage==="polishing" || stage==="finished"} />
@@ -504,7 +499,7 @@ export default function Page() {
       </div>
 
       <main className="max-w-7xl mx-auto px-5 py-6 grid lg:grid-cols-[minmax(360px,500px)_1fr] gap-6">
-        {/* 左カラム：入力 */}
+        {/* 左：入力 */}
         <form onSubmit={handleGenerate} className="space-y-4">
           <section className="bg-white rounded-2xl shadow p-4 space-y-3">
             <div className="grid gap-3">
@@ -567,7 +562,7 @@ export default function Page() {
           <section className="bg-white rounded-2xl shadow p-4 space-y-3">
             <div className="text-sm font-medium">チェック &amp; 仕上げ</div>
 
-            {/* 自動チェックのステータス＋再実行＋Polish */}
+            {/* ステータス行 */}
             <div className="flex items-center justify-between rounded-xl border bg-neutral-50 px-3 py-2">
               <div className="text-sm flex items-center gap-2">
                 自動チェック（初回生成後に自動実行）
@@ -591,7 +586,7 @@ export default function Page() {
               </div>
             </div>
 
-            {/* チェック要点（② Before） */}
+            {/* 差分＆要点（② Before） */}
             {(issues2.length > 0 || diff12Html) && (
               <div className="space-y-2">
                 {issues2.length > 0 && (
@@ -609,7 +604,7 @@ export default function Page() {
           </section>
         </form>
 
-        {/* 右カラム：3出力 */}
+        {/* 右：3出力 */}
         <section className="space-y-4">
           {/* 出力① */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
@@ -630,7 +625,7 @@ export default function Page() {
             </div>
           </div>
 
-          {/* 出力②（Before違反のインライン表示） */}
+          {/* 出力②（違反インライン） */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
               <div className="text-sm font-medium">出力② 自動チェック結果（違反箇所は赤下線・ホバーで理由）</div>
@@ -644,13 +639,15 @@ export default function Page() {
             </div>
             <div className="p-4 flex-1 overflow-auto">
               {text2 ? (
-                <div className="text-[15px] leading-relaxed break-words hyphens-auto"
-                  dangerouslySetInnerHTML={{ __html: renderWithHighlights(text2, issues2Structured) }} />
+                <div
+                  className="text-[15px] leading-relaxed break-words hyphens-auto overflow-visible"
+                  dangerouslySetInnerHTML={{ __html: renderWithHighlights(text2, issues2Structured) }}
+                />
               ) : (<div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>)}
             </div>
           </div>
 
-          {/* 出力③（After違反のインライン表示） */}
+          {/* 出力③（Polish後） */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
               <div className="text-sm font-medium">出力③ 仕上げ（Polish）</div>
@@ -664,8 +661,10 @@ export default function Page() {
             </div>
             <div className="p-4 flex-1 overflow-auto">
               {text3 ? (
-                <div className="text-[15px] leading-relaxed break-words hyphens-auto"
-                  dangerouslySetInnerHTML={{ __html: renderWithHighlights(text3, issues3Structured) }} />
+                <div
+                  className="text-[15px] leading-relaxed break-words hyphens-auto overflow-visible"
+                  dangerouslySetInnerHTML={{ __html: renderWithHighlights(text3, issues3Structured) }}
+                />
               ) : (<div className="text-neutral-500 text-sm">— まだPolish未実行 —</div>)}
             </div>
           </div>
@@ -679,7 +678,7 @@ export default function Page() {
         </section>
       </main>
 
-      {/* ======= Bulk Dialog（管理者のみ） ======= */}
+      {/* ======= Bulk Dialog ======= */}
       {isAdmin && showBulk && (
         <div className="fixed inset-0 bg-black/30 z-50 flex items-start md:items-center justify-center p-4" onClick={()=>setShowBulk(false)}>
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl overflow-hidden" onClick={(e)=>e.stopPropagation()}>
