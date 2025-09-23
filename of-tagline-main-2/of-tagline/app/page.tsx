@@ -61,7 +61,7 @@ export default function Page() {
   const [diff12Html, setDiff12Html] = useState("");
   const [diff23Html, setDiff23Html] = useState("");
 
-  // チェック結果の内容（Before を右②にも出す）
+  // チェック結果（Beforeを表示）
   const [issues2, setIssues2] = useState<string[]>([]);
   const [summary2, setSummary2] = useState("");
 
@@ -81,14 +81,11 @@ export default function Page() {
     e.preventDefault();
     setError(null);
 
-    // 新しい流れを開始 → リセット
+    // リセット
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
-    setIssues2([]);
-    setSummary2("");
-    setPolishNotes([]);
-    setAutoFixed(false);
-    setPolishApplied(false);
+    setIssues2([]); setSummary2("");
+    setPolishNotes([]); setAutoFixed(false); setPolishApplied(false);
     setCheckStatus("idle");
 
     try {
@@ -109,7 +106,7 @@ export default function Page() {
       const generated = String(j?.text || "");
       setText1(generated);
 
-      // ② 自動チェック（→ ③ Polish までAPI内で実施。中間＆最終を受け取る）
+      // ②（→③まで）自動チェック
       await handleCheck(generated, /*suppressBusy*/ true);
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
@@ -138,7 +135,6 @@ export default function Page() {
           name, url, mustWords: mustInput,
           tone,
           minChars, maxChars,
-          // request は廃止（自動仕上げに統合）
         }),
       });
       const j = await res.json();
@@ -182,8 +178,7 @@ export default function Page() {
     setMinChars(450); setMaxChars(550);
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
-    setIssues2([]);
-    setSummary2("");
+    setIssues2([]); setSummary2("");
     setPolishNotes([]); setPolishApplied(false); setAutoFixed(false);
     setError(null);
     setCheckStatus("idle");
