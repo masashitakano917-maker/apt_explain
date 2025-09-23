@@ -54,7 +54,7 @@ function readability(text: string) {
   }, 0);
 
   // 簡易グレード
-  let grade = "B";
+  let grade: "A"|"B"|"C" = "B";
   if (avg <= 70 && pPolite >= 0.5 && pPolite <= 0.75 && pNoun <= 0.35 && repeats <= 2) grade = "A";
   if (avg > 95 || repeats >= 5) grade = "C";
 
@@ -76,7 +76,7 @@ type CheckIssue = {
   message: string;
 };
 
-/* ========= highlight renderer ========= */
+/* ========= highlight renderer（カスタムツールチップ付き） ========= */
 function renderWithHighlights(text: string, issues: CheckIssue[]) {
   if (!text) return "";
   if (!issues?.length) return escapeHtml(text).replace(/\n/g, "<br/>");
@@ -91,8 +91,15 @@ function renderWithHighlights(text: string, issues: CheckIssue[]) {
   for (const g of segs) {
     if (g.s > cur) out.push(escapeHtml(text.slice(cur, g.s)));
     const frag = escapeHtml(text.slice(g.s, g.e));
+    const tipHtml = escapeHtml(g.tip).replace(/\n/g, "<br/>");
+    // group-hover で黒ポップのツールチップを表示（pointer-events: none）
     out.push(
-      `<span class="underline decoration-red-400 decoration-2 underline-offset-[3px] text-red-700" title="${escapeHtml(g.tip)}">${frag}</span>`
+      `<span class="relative group underline decoration-red-400 decoration-2 underline-offset-[3px] text-red-700 cursor-help">
+         <span class="relative z-[1]">${frag}</span>
+         <span class="pointer-events-none absolute left-0 top-full mt-1 hidden group-hover:block bg-black text-white text-[11px] rounded px-2 py-1 whitespace-pre-wrap max-w-[28rem] shadow-lg">
+           ${tipHtml}
+         </span>
+       </span>`
     );
     cur = g.e;
   }
@@ -130,6 +137,46 @@ function parseCsv(text: string): string[][] {
   return rows.filter(r => r.some(x => x));
 }
 
+/* ========= ステッパー ========= */
+type FlowStep =
+  | "idle"
+  | "gen-start" | "gen-done"
+  | "check-run" | "check-done"
+  | "polish-run" | "polish-done";
+
+const FLOW_STEPS: { id: Exclude<FlowStep, "idle">; label: string }[] = [
+  { id: "gen-start",   label: "生成開始" },
+  { id: "gen-done",    label: "初回生成完了" },
+  { id: "check-run",   label: "自動チェック中" },
+  { id: "check-done",  label: "チェック完了" },
+  { id: "polish-run",  label: "仕上げ中" },
+  { id: "polish-done", label: "完了" },
+];
+
+function Stepper({ flow }: { flow: FlowStep }) {
+  const idx = FLOW_STEPS.findIndex(s => s.id === flow);
+  return (
+    <div className="hidden md:flex items-center gap-2">
+      {FLOW_STEPS.map((s, i) => {
+        const active = i <= idx && idx >= 0;
+        const current = i === idx && idx >= 0;
+        return (
+          <span
+            key={s.id}
+            className={cn(
+              "px-2 py-0.5 rounded-full text-xs border transition-colors",
+              active ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-neutral-50 text-neutral-600 border-neutral-200",
+            )}
+            style={current ? { boxShadow: "0 0 0 2px rgba(16,185,129,.35) inset" } : undefined}
+          >
+            {s.label}{active ? " ✔" : ""}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ========= component ========= */
 export default function Page() {
   /* 単件入力 */
@@ -164,10 +211,10 @@ export default function Page() {
 
   const [checkStatus, setCheckStatus] = useState<CheckStatus>("idle");
 
-  /* 進捗（チップ） */
-  const done1 = !!text1;
-  const done2 = !!text2 && checkStatus === "done";
-  const done3 = !!text3;
+  /* 進捗（6段階） */
+  const [flow, setFlow] = useState<FlowStep>("idle");
+  const flowIdx = Math.max(0, FLOW_STEPS.findIndex(s => s.id === flow) + 1);
+  const flowWidth = `${(flowIdx / FLOW_STEPS.length) * 100}%`;
 
   /* 読みやすさ */
   const r1 = useMemo(()=> readability(text1), [text1]);
@@ -209,6 +256,7 @@ export default function Page() {
     setIssues2([]); setIssues3([]); setIssues2Structured([]); setIssues3Structured([]);
     setSummary2(""); setSummary3("");
     setCheckStatus("idle");
+    setFlow("gen-start");
 
     try {
       if (!name.trim()) throw new Error("物件名を入力してください。");
@@ -226,6 +274,7 @@ export default function Page() {
       if (!r0.ok) throw new Error(j0?.error || "生成に失敗しました。");
       const generated = String(j0?.text || "");
       setText1(generated);
+      setFlow("gen-done");
 
       // ② 自動チェック
       await handleCheck(generated, /*busy抑制*/ true);
@@ -245,6 +294,7 @@ export default function Page() {
       if (!suppressBusy) setBusy(true);
 
       setCheckStatus("running");
+      setFlow("check-run");
       setIssues2([]); setSummary2(""); setDiff12Html(""); setIssues2Structured([]);
 
       const res = await fetch("/api/review", {
@@ -268,6 +318,7 @@ export default function Page() {
       setSummary2(summary);
       setDiff12Html(markDiffRed(src, improved));
       setCheckStatus("done");
+      setFlow("check-done");
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
       setCheckStatus("error");
@@ -284,6 +335,7 @@ export default function Page() {
       if (!text2.trim()) throw new Error("まず②のチェックを完了してください。");
 
       setBusy(true);
+      setFlow("polish-run");
       const res = await fetch("/api/review", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -304,6 +356,7 @@ export default function Page() {
       setIssues3Structured(issuesStructuredAfter);
       setSummary3(summary);
       setDiff23Html(markDiffRed(text2, improved));
+      setFlow("polish-done");
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
     } finally {
@@ -320,11 +373,12 @@ export default function Page() {
     setIssues2([]); setIssues3([]); setIssues2Structured([]); setIssues3Structured([]);
     setSummary2(""); setSummary3("");
     setError(null); setCheckStatus("idle");
+    setFlow("idle");
   }
 
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch {} };
 
-  /* ステータス表示 */
+  /* ステータス表示（従来表示も残す） */
   const statusLabel =
     checkStatus === "running" ? "実行中…" :
     checkStatus === "done"    ? "完了" :
@@ -349,39 +403,39 @@ export default function Page() {
   const bulkBusyRef = useRef(false);
 
   function loadCsvIntoRows() {
-  const rows = parseCsv(bulkText);
-  if (!rows.length) return setBulkRows([]);
-  const [head, ...body] = rows;
-  const h = head.map(s => s.toLowerCase());
-  const idx = {
-    name: h.indexOf("name"),
-    url:  h.indexOf("url"),
-    tone: h.indexOf("tone"),
-    min:  h.indexOf("min"),
-    max:  h.indexOf("max"),
-    must: h.indexOf("mustwords"),
-  };
+    const rows = parseCsv(bulkText);
+    if (!rows.length) return setBulkRows([]);
+    const [head, ...body] = rows;
+    const h = head.map(s => s.toLowerCase());
+    const idx = {
+      name: h.indexOf("name"),
+      url:  h.indexOf("url"),
+      tone: h.indexOf("tone"),
+      min:  h.indexOf("min"),
+      max:  h.indexOf("max"),
+      must: h.indexOf("mustwords"),
+    };
 
-  const items: BulkRow[] = body
-    .map((r, k) => {
-      const item: BulkRow = {
-        id: k + 1,
-        name: r[idx.name] || "",
-        url:  r[idx.url]  || "",
-        tone: (tones as readonly string[]).includes(r[idx.tone] as any)
-          ? (r[idx.tone] as Tone)
-          : "一般的",
-        min:  Number(r[idx.min] || 450) || 450,
-        max:  Number(r[idx.max] || 550) || 550,
-        must: r[idx.must] || "",
-        status: "idle" as const, // ★ ここがポイント（リテラル固定）
-      };
-      return item;
-    })
-    .filter(it => it.name && /^https?:\/\//i.test(it.url));
+    const items: BulkRow[] = body
+      .map((r, k) => {
+        const item: BulkRow = {
+          id: k + 1,
+          name: r[idx.name] || "",
+          url:  r[idx.url]  || "",
+          tone: (tones as readonly string[]).includes(r[idx.tone] as any)
+            ? (r[idx.tone] as Tone)
+            : "一般的",
+          min:  Number(r[idx.min] || 450) || 450,
+          max:  Number(r[idx.max] || 550) || 550,
+          must: r[idx.must] || "",
+          status: "idle" as const,
+        };
+        return item;
+      })
+      .filter(it => it.name && /^https?:\/\//i.test(it.url));
 
-  setBulkRows(items);
-}
+    setBulkRows(items);
+  }
 
   async function runBulkQueue() {
     if (bulkBusyRef.current) return;
@@ -413,7 +467,7 @@ export default function Page() {
 
         rows[i].out1 = t1;
         rows[i].out2 = String(j2?.improved || "");
-        rows[i].out3 = String(j2?.improved || ""); // ここでは②を採用（必要なら別途Polishも回せる）
+        rows[i].out3 = String(j2?.improved || ""); // 今は②を採用（必要ならPolishも回せる）
         rows[i].issues2 = Array.isArray(j2?.issues) ? j2.issues : [];
         rows[i].issues3 = Array.isArray(j2?.issues_after) ? j2.issues_after : [];
         rows[i].status = "ok";
@@ -448,21 +502,10 @@ export default function Page() {
       <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b">
         <div className="max-w-7xl mx-auto px-5 py-3 flex items-center justify-between gap-3">
           <div className="text-lg font-semibold">マンション説明文作成</div>
-          <div className="flex items-center gap-2">
-            {/* 進捗チップ */}
-            <span className={cn("px-2 py-0.5 rounded-full text-xs border",
-              done1 ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-neutral-50 text-neutral-600 border-neutral-200")}>
-              ① 初回生成 {done1 ? "✔" : ""}
-            </span>
-            <span className={cn("px-2 py-0.5 rounded-full text-xs border",
-              done2 ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-neutral-50 text-neutral-600 border-neutral-200")}>
-              ② 自動チェック {done2 ? "✔" : ""}
-            </span>
-            <span className={cn("px-2 py-0.5 rounded-full text-xs border",
-              done3 ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-neutral-50 text-neutral-600 border-neutral-200")}>
-              ③ 仕上げ（Polish） {done3 ? "✔" : ""}
-            </span>
 
+          {/* ステッパー + 管理ボタン */}
+          <div className="flex items-center gap-2">
+            <Stepper flow={flow} />
             {isAdmin ? (
               <>
                 <Button type="button" className="ml-2" onClick={()=>setShowBulk(true)}>バルク生成</Button>
@@ -475,9 +518,10 @@ export default function Page() {
         </div>
       </header>
 
-      {/* 進捗ライン */}
-      <div className="bg-gradient-to-r from-emerald-500 via-yellow-400 to-neutral-200 h-1"
-           style={{ width: done3 ? "100%" : done2 ? "66%" : done1 ? "33%" : "4%" }} />
+      {/* 進捗ライン（現在段階までが光る） */}
+      <div className="bg-neutral-200 h-1">
+        <div className="h-1 bg-gradient-to-r from-emerald-500 via-emerald-400 to-emerald-300 transition-all" style={{ width: flow === "idle" ? "0%" : flowWidth }} />
+      </div>
 
       <main className="max-w-7xl mx-auto px-5 py-6 grid lg:grid-cols-[minmax(360px,500px)_1fr] gap-6">
         {/* 左カラム：入力 */}
@@ -540,10 +584,10 @@ export default function Page() {
             </div>
           </section>
 
+            {/* チェック & 仕上げ（1行ヘッダ + 従来ステータス） */}
           <section className="bg-white rounded-2xl shadow p-4 space-y-3">
             <div className="text-sm font-medium">チェック &amp; 仕上げ</div>
 
-            {/* 自動チェックのステータス＋再実行＋Polish */}
             <div className="flex items-center justify-between rounded-xl border bg-neutral-50 px-3 py-2">
               <div className="text-sm">自動チェック（初回生成後に自動実行）</div>
               <div className="flex items-center gap-2">
@@ -553,7 +597,6 @@ export default function Page() {
               </div>
             </div>
 
-            {/* チェック要点（② Before） */}
             {(issues2.length > 0 || diff12Html) && (
               <div className="space-y-2">
                 {issues2.length > 0 && (
@@ -576,13 +619,14 @@ export default function Page() {
           {/* 出力① */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
-              <div className="text-sm font-medium">出力① 初回生成</div>
-              <div className="flex items-center gap-2">
+              <div className="text-sm font-medium whitespace-nowrap">出力① 初回生成</div>
+              <div className="flex items-center gap-2 shrink-0">
                 <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
                   読みやすさ {r1.grade}
                 </span>
-                <div className="text-[11px] text-neutral-500">{r1.detail}</div>
-                <Button onClick={()=>copy(text1)} disabled={!text1}>コピー</Button>
+                <div className="text-[11px] text-neutral-500 hidden sm:block">{r1.detail}</div>
+                <div className="text-xs text-neutral-500 sm:hidden">{jaLen(text1)} 文字</div>
+                <Button onClick={()=>copy(text1)} disabled={!text1} className="px-3 py-1 text-xs">コピー</Button>
               </div>
             </div>
             <div className="p-4 flex-1 overflow-auto">
@@ -592,16 +636,20 @@ export default function Page() {
             </div>
           </div>
 
-          {/* 出力②（Before違反のインライン表示） */}
+          {/* 出力②（違反を赤下線＋ホバー理由） */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
-              <div className="text-sm font-medium">出力② 自動チェック結果（違反箇所は赤下線・ホバーで理由）</div>
-              <div className="flex items-center gap-2">
+              <div className="text-sm font-medium whitespace-nowrap">
+                出力② 自動チェック結果
+                <span className="ml-2 text-xs text-neutral-500 hidden sm:inline">（違反箇所は赤下線・ホバーで理由）</span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
                 <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
                   読みやすさ {r2.grade}
                 </span>
-                <div className="text-[11px] text-neutral-500">{r2.detail}</div>
-                <Button onClick={()=>copy(text2)} disabled={!text2}>コピー</Button>
+                <div className="text-[11px] text-neutral-500 hidden sm:block">{r2.detail}</div>
+                <div className="text-xs text-neutral-500 sm:hidden">{jaLen(text2)} 文字</div>
+                <Button onClick={()=>copy(text2)} disabled={!text2} className="px-3 py-1 text-xs">コピー</Button>
               </div>
             </div>
             <div className="p-4 flex-1 overflow-auto">
@@ -615,13 +663,14 @@ export default function Page() {
           {/* 出力③（After違反のインライン表示） */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between gap-3">
-              <div className="text-sm font-medium">出力③ 仕上げ（Polish）</div>
-              <div className="flex items-center gap-2">
+              <div className="text-sm font-medium whitespace-nowrap">出力③ 仕上げ（Polish）</div>
+              <div className="flex items-center gap-2 shrink-0">
                 <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
                   読みやすさ {r3.grade}
                 </span>
-                <div className="text-[11px] text-neutral-500">{r3.detail}</div>
-                <Button onClick={()=>copy(text3)} disabled={!text3}>コピー</Button>
+                <div className="text-[11px] text-neutral-500 hidden sm:block">{r3.detail}</div>
+                <div className="text-xs text-neutral-500 sm:hidden">{jaLen(text3)} 文字</div>
+                <Button onClick={()=>copy(text3)} disabled={!text3} className="px-3 py-1 text-xs">コピー</Button>
               </div>
             </div>
             <div className="p-4 flex-1 overflow-auto">
@@ -634,8 +683,8 @@ export default function Page() {
 
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
-              ※ <code>/api/describe</code> が初回文（①）を生成。<code>/api/review</code> がチェック（②）と仕上げ（③）を返します。
-              ②の違反は本文中でも赤い下線で確認できます（ホバーで理由）。
+              ※ <code>/api/describe</code> が初回文（①）を生成。<code>/api/review</code> がチェック（②）と仕上げ（③）を返します。<br/>
+              ※ ②では本文中の違反箇所を<strong className="text-red-600">赤下線</strong>で表示し、ホバーで理由のツールチップが出ます。従来のリスト表示も下段に残しています。
             </div>
           </div>
         </section>
