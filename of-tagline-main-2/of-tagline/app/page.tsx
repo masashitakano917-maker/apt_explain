@@ -8,7 +8,7 @@ const cn = (...a: (string | false | null | undefined)[]) => a.filter(Boolean).jo
 const jaLen = (s: string) => Array.from(s || "").length;
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
 const parseWords = (src: string) =>
-  String(src || "").split(/[ ,、\s\n/]+/).map((s) => s.trim()).filter(Boolean);
+  String(src || "").split(/[ ,、\s\n\/]+/).map((s) => s.trim()).filter(Boolean);
 
 /** LCSベースの差分（挿入/変更部分を <mark> 赤表示） */
 function markDiffRed(original: string, improved: string) {
@@ -54,21 +54,21 @@ export default function Page() {
 
   // 出力①②③
   const [text1, setText1] = useState(""); // 初回生成
-  const [text2, setText2] = useState(""); // チェック結果
-  const [text3, setText3] = useState(""); // 要望反映
+  const [text2, setText2] = useState(""); // チェック後（自動修正済み）
+  const [text3, setText3] = useState(""); // 自動仕上げ（Polish）
 
   // 差分表示（①→②、②→③）
   const [diff12Html, setDiff12Html] = useState("");
   const [diff23Html, setDiff23Html] = useState("");
 
-  // チェック結果の内容
+  // チェック結果の内容（Before を右②にも出す）
   const [issues2, setIssues2] = useState<string[]>([]);
-  const [issues3, setIssues3] = useState<string[]>([]);
   const [summary2, setSummary2] = useState("");
-  const [summary3, setSummary3] = useState("");
 
-  // 追加要望
-  const [requestNote, setRequestNote] = useState("");
+  // Polishのメモとフラグ
+  const [polishNotes, setPolishNotes] = useState<string[]>([]);
+  const [autoFixed, setAutoFixed] = useState(false);
+  const [polishApplied, setPolishApplied] = useState(false);
 
   // 自動チェックのステータス
   const [checkStatus, setCheckStatus] = useState<CheckStatus>("idle");
@@ -84,8 +84,11 @@ export default function Page() {
     // 新しい流れを開始 → リセット
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
-    setIssues2([]); setIssues3([]);
-    setSummary2(""); setSummary3("");
+    setIssues2([]);
+    setSummary2("");
+    setPolishNotes([]);
+    setAutoFixed(false);
+    setPolishApplied(false);
     setCheckStatus("idle");
 
     try {
@@ -106,7 +109,7 @@ export default function Page() {
       const generated = String(j?.text || "");
       setText1(generated);
 
-      // ② 自動チェック
+      // ② 自動チェック（→ ③ Polish までAPI内で実施。中間＆最終を受け取る）
       await handleCheck(generated, /*suppressBusy*/ true);
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
@@ -116,7 +119,7 @@ export default function Page() {
     }
   }
 
-  /* ------------ チェック ------------ */
+  /* ------------ チェック（APIは②と③の両方を返す） ------------ */
   async function handleCheck(baseText?: string, suppressBusy = false) {
     try {
       const src = (baseText ?? text1).trim();
@@ -124,7 +127,8 @@ export default function Page() {
       if (!suppressBusy) setBusy(true);
 
       setCheckStatus("running");
-      setIssues2([]); setSummary2(""); setDiff12Html("");
+      setIssues2([]); setSummary2(""); setDiff12Html(""); setDiff23Html("");
+      setPolishNotes([]); setPolishApplied(false); setAutoFixed(false);
 
       const res = await fetch("/api/review", {
         method: "POST",
@@ -134,20 +138,35 @@ export default function Page() {
           name, url, mustWords: mustInput,
           tone,
           minChars, maxChars,
-          request: "",
+          // request は廃止（自動仕上げに統合）
         }),
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j?.error || "チェックに失敗しました。");
 
-      const improved = String(j?.improved ?? src);
-      const issues = Array.isArray(j?.issues) ? j.issues : [];
-      const summary = j?.summary || (issues.length ? issues.join(" / ") : "");
+      // ② チェック後（中間）
+      const afterCheck = String(j?.text_after_check ?? j?.improved ?? src);
+      setText2(afterCheck);
 
-      setText2(improved);
-      setIssues2(issues);
+      const issuesBefore = Array.isArray(j?.issues_before) ? j.issues_before
+                        : Array.isArray(j?.issues) ? j.issues : [];
+      const summary = j?.summary || (issuesBefore.length ? issuesBefore.join(" / ") : "");
+      setIssues2(issuesBefore);
       setSummary2(summary);
-      setDiff12Html(markDiffRed(src, improved));
+
+      // ③ 自動仕上げ（Polish）
+      const afterPolish = typeof j?.text_after_polish === "string" ? j.text_after_polish : "";
+      setText3(afterPolish);
+
+      // 差分
+      setDiff12Html(markDiffRed(src, afterCheck));
+      setDiff23Html(afterPolish ? markDiffRed(afterCheck, afterPolish) : "");
+
+      // フラグとメモ
+      setAutoFixed(Boolean(j?.auto_fixed));
+      setPolishApplied(Boolean(j?.polish_applied));
+      setPolishNotes(Array.isArray(j?.polish_notes) ? j.polish_notes : []);
+
       setCheckStatus("done");
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
@@ -157,53 +176,15 @@ export default function Page() {
     }
   }
 
-  /* ------------ 追加要望の反映（②→③） ------------ */
-  async function handleApplyRequest() {
-    setError(null);
-    setIssues3([]); setSummary3(""); setDiff23Html("");
-    try {
-      if (!text2.trim()) throw new Error("まず②のチェックを完了してください。");
-      if (!requestNote.trim()) throw new Error("修正要望を入力してください。");
-
-      setBusy(true);
-      const res = await fetch("/api/review", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: `${text2}\n\n【追加要望】${requestNote}`,
-          name, url, mustWords: mustInput,
-          tone,
-          minChars, maxChars,
-        }),
-      });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || "要望反映に失敗しました。");
-
-      const improved = String(j?.improved ?? text2);
-      const issues = Array.isArray(j?.issues) ? j.issues : [];
-      const summary = j?.summary || (issues.length ? issues.join(" / ") : "");
-
-      setText3(improved);
-      setIssues3(issues);
-      setSummary3(summary);
-      setDiff23Html(markDiffRed(text2, improved));
-      setRequestNote("");
-    } catch (err: any) {
-      setError(err?.message || "エラーが発生しました。");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   function handleReset() {
     setName(""); setUrl(""); setMustInput("");
     setTone("上品・落ち着いた");
     setMinChars(450); setMaxChars(550);
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
-    setIssues2([]); setIssues3([]);
-    setSummary2(""); setSummary3("");
-    setRequestNote("");
+    setIssues2([]);
+    setSummary2("");
+    setPolishNotes([]); setPolishApplied(false); setAutoFixed(false);
     setError(null);
     setCheckStatus("idle");
   }
@@ -261,7 +242,7 @@ export default function Page() {
                 <span className="text-sm font-medium">マストワード</span>
                 <textarea
                   className="border rounded-lg p-2 min-h-[84px]"
-                  placeholder="例）駅徒歩3分 ラウンジ ペット可 角部屋 など（空白/改行/カンマ区切り）"
+                  placeholder="例）駅徒歩3分 ラウンジ ペット可 など（空白/改行/カンマ区切り）"
                   value={mustInput}
                   onChange={(e) => setMustInput(e.target.value)}
                 />
@@ -318,8 +299,9 @@ export default function Page() {
             </div>
           </section>
 
+          {/* 左：チェック可視化（ステータス／差分／要点） */}
           <section className="bg-white rounded-2xl shadow p-4 space-y-3">
-            <div className="text-sm font-medium">チェック &amp; 改善</div>
+            <div className="text-sm font-medium">チェック &amp; 仕上げの結果</div>
 
             {/* 1行：自動チェックのステータス＋再実行 */}
             <div className="flex items-center justify-between rounded-xl border bg-neutral-50 px-3 py-2">
@@ -337,8 +319,8 @@ export default function Page() {
               </div>
             </div>
 
-            {/* チェック結果（①→②の差分と要点） */}
-            {(issues2.length > 0 || diff12Html) && (
+            {/* 要点（Beforeの指摘） */}
+            {(issues2.length > 0 || summary2) && (
               <div className="space-y-2">
                 {issues2.length > 0 && (
                   <ul className="text-sm list-disc pl-5 space-y-1">
@@ -346,40 +328,38 @@ export default function Page() {
                   </ul>
                 )}
                 {!!summary2 && <div className="text-xs text-neutral-500">要約: {summary2}</div>}
-                {!!diff12Html && (
-                  <div
-                    className="border rounded-lg p-3 text-sm leading-relaxed"
-                    dangerouslySetInnerHTML={{ __html: diff12Html }}
-                  />
-                )}
               </div>
             )}
 
-            <div className="grid gap-2">
-              <label className="text-sm font-medium">追加の修正要望</label>
-              <textarea
-                className="border rounded-lg p-2 min-h-[72px]"
-                placeholder="例）冒頭で物件名を自然に強調／交通の具体性を1文だけ入れてほしい など"
-                value={requestNote}
-                onChange={(e) => setRequestNote(e.target.value)}
-              />
-              <div>
-                <Button
-                  type="button"
-                  onClick={handleApplyRequest}
-                  disabled={busy || !text2 || !requestNote.trim()}
-                  color="orange"
-                >
-                  要望を反映して再修正
-                </Button>
+            {/* 差分 ①→② / ②→③ */}
+            {(diff12Html || diff23Html) && (
+              <div className="space-y-3">
+                {!!diff12Html && (
+                  <details open className="rounded border">
+                    <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分 ①→②（初回 → チェック後）</summary>
+                    <div
+                      className="p-3 text-sm leading-relaxed"
+                      dangerouslySetInnerHTML={{ __html: diff12Html }}
+                    />
+                  </details>
+                )}
+                {!!diff23Html && (
+                  <details className="rounded border">
+                    <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分 ②→③（チェック後 → 自動仕上げ）</summary>
+                    <div
+                      className="p-3 text-sm leading-relaxed"
+                      dangerouslySetInnerHTML={{ __html: diff23Html }}
+                    />
+                  </details>
+                )}
               </div>
-            </div>
+            )}
           </section>
         </form>
 
         {/* 右カラム：3つの出力 */}
         <section className="space-y-4">
-          {/* 出力① */}
+          {/* 出力① 初回生成 */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between">
               <div className="text-sm font-medium">出力① 初回生成</div>
@@ -397,45 +377,78 @@ export default function Page() {
             </div>
           </div>
 
-          {/* 出力② */}
+          {/* 出力② チェック後（自動修正済み） */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between">
-              <div className="text-sm font-medium">出力② チェック結果</div>
+              <div className="text-sm font-medium flex items-center gap-2">
+                出力② チェック後（自動修正済み）
+                {autoFixed ? (
+                  <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">自動修正適用</span>
+                ) : (
+                  <span className="text-xs bg-neutral-100 text-neutral-600 px-2 py-0.5 rounded">修正なし</span>
+                )}
+              </div>
               <div className="flex items-center gap-3">
                 <div className="text-xs text-neutral-500">長さ：{jaLen(text2)} 文字</div>
                 <Button onClick={() => copy(text2)} disabled={!text2}>コピー</Button>
               </div>
             </div>
-            <div className="p-4 flex-1 overflow-auto">
+            <div className="p-4 flex-1 overflow-auto space-y-3">
               {text2 ? (
-                <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text2}</p>
+                <>
+                  <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text2}</p>
+                  {issues2.length > 0 && (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-xs text-neutral-600">チェック結果（改善前の指摘）</summary>
+                      <ul className="mt-2 list-disc pl-5 text-xs text-neutral-700">
+                        {issues2.map((x, i) => <li key={i}>{x}</li>)}
+                      </ul>
+                    </details>
+                  )}
+                </>
               ) : (
                 <div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>
               )}
             </div>
           </div>
 
-          {/* 出力③ */}
+          {/* 出力③ 自動仕上げ（Polish） */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between">
-              <div className="text-sm font-medium">出力③ 要望反映結果</div>
+              <div className="text-sm font-medium flex items-center gap-2">
+                出力③ 自動仕上げ（Polish）
+                {polishApplied ? (
+                  <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">適用</span>
+                ) : (
+                  <span className="text-xs bg-neutral-100 text-neutral-600 px-2 py-0.5 rounded">未適用</span>
+                )}
+              </div>
               <div className="flex items-center gap-3">
-                <div className="text-xs text-neutral-500">長さ：{jaLen(text3)} 文字</div>
-                <Button onClick={() => copy(text3)} disabled={!text3}>コピー</Button>
+                <div className="text-xs text-neutral-500">長さ：{jaLen(text3 || text2)} 文字</div>
+                <Button onClick={() => copy(text3 || text2)} disabled={!(text3 || text2)}>コピー</Button>
               </div>
             </div>
-            <div className="p-4 flex-1 overflow-auto">
-              {text3 ? (
-                <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text3}</p>
+            <div className="p-4 flex-1 overflow-auto space-y-3">
+              {text3 || text2 ? (
+                <>
+                  <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text3 || text2}</p>
+                  {polishNotes.length > 0 && (
+                    <ul className="mt-1 list-disc pl-5 text-xs text-neutral-600">
+                      {polishNotes.map((n, i) => <li key={i}>{n}</li>)}
+                    </ul>
+                  )}
+                </>
               ) : (
-                <div className="text-neutral-500 text-sm">— まだ要望未反映 —</div>
+                <div className="text-neutral-500 text-sm">— 仕上げは②が完成後に表示 —</div>
               )}
             </div>
           </div>
 
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
-              ※ <code>/api/describe</code> が初回文（①）を生成。<code>/api/review</code> がチェック（②）と要望反映（③）を返します。初回生成後は自動で②が実行されます。
+              ※ <code>/api/describe</code> が初回文（①）を生成。<code>/api/review</code> は<br/>
+              ②「チェック後（自動修正済み）」は <code>text_after_check</code>、<br/>
+              ③「自動仕上げ（Polish）」は <code>text_after_polish</code> を返します（未適用時は②を表示）。
             </div>
           </div>
         </section>
