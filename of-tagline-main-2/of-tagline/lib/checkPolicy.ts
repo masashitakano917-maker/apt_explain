@@ -1,6 +1,5 @@
 // lib/checkPolicy.ts
-// v4: 不動産表記ルール（禁止用語／不当表示／商標／二重価格）+ 住戸特定（scope切替）
-//
+// v4.1: 不動産表記ルール（禁止用語／不当表示／商標／二重価格）+ 住戸特定（scope切替）
 // - 全角→半角の正規化、ゆらぎ（空白/中黒/ダッシュ）に強いルーズ一致
 // - scope: "building" | "unit" で住戸特定ルールのON/OFFを切替（既定は building）
 
@@ -166,6 +165,11 @@ const reM2 = /約?\s*\d{1,3}(?:\.\d+)?\s*(?:㎡|m²|m2|平米)/gi;
 const rePlanLDK = /約?\s*\d{1,3}(?:\.\d+)?\s*(?:帖|畳)\s*の?\s*(?:[1-5]?(?:LDK|DK|K|L|S))/gi;
 const reFloorPart = /\d+\s*階部分/gi;
 
+// 追加：住戸の間取り型（1LDK/2DK/1K/1R/2SLDK 等を広く許容）
+// - 全角数字・全角スペース・全角英字にも対応
+const rePlanType =
+  /\b(?:(?:[1-5１-５])[\s　]*(?:[sｓSＳ])?[\s　]*(?:[lｌLＬ])[\s　]*(?:[dｄDＤ])[\s　]*(?:[kｋKＫ])|(?:[1-2１-２])[\s　]*(?:[dｄDＤ])[\s　]*(?:[kｋKＫ])|(?:[1-3１-３])[\s　]*(?:[kｋKＫ])|(?:[1-3１-３])[\s　]*(?:[rｒRＲ]))\b/gi;
+
 const unitRules: Rule[] = [
   ...listRules(
     "unit-terms",
@@ -176,6 +180,7 @@ const unitRules: Rule[] = [
     "棟紹介では住戸を特定し得る表現（向き・角部屋・階数等）は不可です。"
   ),
 
+  { id: "unit-plan-type", label: "住戸の間取り型", category: "不当表示", severity: "error", pattern: rePlanType, message: "棟紹介では住戸の具体的な間取り型の記載は避けてください。" },
   { id: "unit-size-tatami", label: "住戸の広さ（帖/畳）", category: "不当表示", severity: "error", pattern: reTatami, message: "棟紹介では帖/畳など住戸の広さは記載不可です。" },
   { id: "unit-size-m2", label: "住戸の広さ（㎡/平米）", category: "不当表示", severity: "error", pattern: reM2, message: "棟紹介では㎡/平米など住戸の広さは記載不可です。" },
   { id: "unit-ldk-size", label: "帖数付きLDK表現", category: "不当表示", severity: "error", pattern: rePlanLDK, message: "棟紹介では帖数付きのLDK表現は記載不可です。" },
