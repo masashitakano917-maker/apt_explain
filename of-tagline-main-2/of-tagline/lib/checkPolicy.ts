@@ -1,5 +1,5 @@
 // lib/checkPolicy.ts
-// v4.1: 不動産表記ルール（禁止用語／不当表示／商標／二重価格）+ 住戸特定（scope切替）
+// v4.2: 不動産表記ルール（禁止用語／不当表示／商標／二重価格）+ 住戸特定（scope切替）
 // - 全角→半角の正規化、ゆらぎ（空白/中黒/ダッシュ）に強いルーズ一致
 // - scope: "building" | "unit" で住戸特定ルールのON/OFFを切替（既定は building）
 
@@ -141,6 +141,16 @@ const baseRules: Rule[] = [
   ...listRules("tm", "商標名の無断使用", "商標", "error", TM_LIST, "登録商標/著名施設名の無断使用は避けてください。"),
 ];
 
+// 軽い誇張の警告（「〜を誇ります」）
+baseRules.push({
+  id: "promo-boast",
+  label: "誇張表現",
+  category: "不当表示",
+  severity: "warn",
+  pattern: /を誇り?ます/g,
+  message: "誇張的な表現です。中立表現への置き換えを検討してください。"
+});
+
 /* ===================== 住戸特定（buildingでのみ適用） ===================== */
 // 住戸特定ワード（文字列）
 const UNIT_TERMS = [
@@ -165,10 +175,13 @@ const reM2 = /約?\s*\d{1,3}(?:\.\d+)?\s*(?:㎡|m²|m2|平米)/gi;
 const rePlanLDK = /約?\s*\d{1,3}(?:\.\d+)?\s*(?:帖|畳)\s*の?\s*(?:[1-5]?(?:LDK|DK|K|L|S))/gi;
 const reFloorPart = /\d+\s*階部分/gi;
 
-// 追加：住戸の間取り型（1LDK/2DK/1K/1R/2SLDK 等を広く許容）
-// - 全角数字・全角スペース・全角英字にも対応
+// 住戸の間取り型（1LDK/2DK/1K/1R/2SLDK 等、全角/半角/スペース許容）
 const rePlanType =
   /\b(?:(?:[1-5１-５])[\s　]*(?:[sｓSＳ])?[\s　]*(?:[lｌLＬ])[\s　]*(?:[dｄDＤ])[\s　]*(?:[kｋKＫ])|(?:[1-2１-２])[\s　]*(?:[dｄDＤ])[\s　]*(?:[kｋKＫ])|(?:[1-3１-３])[\s　]*(?:[kｋKＫ])|(?:[1-3１-３])[\s　]*(?:[rｒRＲ]))\b/gi;
+
+// 住戸内設備／全居室〜
+const reUnitEquip = /(システムキッチン|浴室乾燥機|食(?:器洗い)?乾燥機|食洗機|ディスポーザー|浄水器|床暖房|ウォークインクローゼット|WIC|カウンターキッチン|対面キッチン|アイランドキッチン)/gi;
+const reAllRooms  = /全居室[^\s。]{0,8}(?:フローリング|収納|採光|窓)/gi;
 
 const unitRules: Rule[] = [
   ...listRules(
@@ -179,12 +192,13 @@ const unitRules: Rule[] = [
     UNIT_TERMS,
     "棟紹介では住戸を特定し得る表現（向き・角部屋・階数等）は不可です。"
   ),
-
   { id: "unit-plan-type", label: "住戸の間取り型", category: "不当表示", severity: "error", pattern: rePlanType, message: "棟紹介では住戸の具体的な間取り型の記載は避けてください。" },
   { id: "unit-size-tatami", label: "住戸の広さ（帖/畳）", category: "不当表示", severity: "error", pattern: reTatami, message: "棟紹介では帖/畳など住戸の広さは記載不可です。" },
   { id: "unit-size-m2", label: "住戸の広さ（㎡/平米）", category: "不当表示", severity: "error", pattern: reM2, message: "棟紹介では㎡/平米など住戸の広さは記載不可です。" },
   { id: "unit-ldk-size", label: "帖数付きLDK表現", category: "不当表示", severity: "error", pattern: rePlanLDK, message: "棟紹介では帖数付きのLDK表現は記載不可です。" },
   { id: "unit-floor-part", label: "階数の特定表現", category: "不当表示", severity: "error", pattern: reFloorPart, message: "棟紹介では「◯階部分」など住戸階数の示唆は記載不可です。" },
+  { id: "unit-equip", label: "住戸内設備の列挙", category: "不当表示", severity: "error", pattern: reUnitEquip, message: "棟紹介では住戸内の設備列挙は記載不可です。" },
+  { id: "unit-allrooms", label: "全居室〜の記載", category: "不当表示", severity: "error", pattern: reAllRooms, message: "棟紹介では「全居室〜」など住戸内仕様の断定は不可です。" },
 ];
 
 /* ===================== 実行 ===================== */
