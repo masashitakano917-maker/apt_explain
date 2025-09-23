@@ -2,6 +2,7 @@
 export const runtime = "nodejs";
 
 import OpenAI from "openai";
+// プロジェクト構成に合わせてパスを調整（app/api/review から lib へは 3up）
 import { checkText, type CheckIssue } from "../../../lib/checkPolicy";
 
 /* ---------- helpers ---------- */
@@ -76,8 +77,7 @@ const nounStopVariant = (s: string) => {
            .replace(/を備えています。$/, "を備える。")
            .replace(/に位置しています。$/, "に位置。")
            .replace(/に配慮しています。$/, "に配慮。")
-           .replace(/です。$/, "。")
-           .replace(/(て|で)います。$/, "$1いる。");
+           .replace(/です。$/, "。").replace(/ます。$/, "。");
   if (!/[。！？]$/.test(out)) out += "。";
   return out;
 };
@@ -122,27 +122,6 @@ const RE_UNIT_TERMS = /(角部屋|角住戸|最上階|高層階|低層階|南向
 const needsUnitFix = (issues: CheckIssue[]) =>
   issues.some(i => i.id.startsWith("unit-") || /住戸|間取り|階数|㎡|帖|向き|角/.test(i.label + i.message + i.id));
 
-async function rewriteForBuilding(openai: OpenAI, text: string, tone: string, style: string, min: number, max: number, issues: CheckIssue[]) {
-  const forbid = Array.from(new Set(issues.map(i => i.excerpt).filter(Boolean))).slice(0, 20);
-  const r = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.1,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system",
-        content:
-          'Return ONLY {"rewritten": string}. (json)\n' +
-          `役割: 不動産の「棟紹介」ライター。住戸特定情報（階数/向き/角住戸/帖・㎡/具体的間取り型など）を削除・一般化する。\n` +
-          `トーン:${tone}\nスタイル:\n${style}\n` +
-          `要件: 文字数は${min}〜${max}（全角）。固有の事実を創作しない。価格/金額/電話番号/外部URLは禁止。\n` +
-          `以下の語句や数値は本文から削除・一般化の対象:\n- ${forbid.join(" / ")}` },
-      { role: "user", content: JSON.stringify({ text }) }
-    ]
-  });
-  try { return String(JSON.parse(r.choices?.[0]?.message?.content || "{}")?.rewritten || text); }
-  catch { return text; }
-}
-
 function scrubUnitSpecificRemainders(text: string): string {
   let t = text;
   t = t.replace(/[^。]*専有面積[^。]*。/g, "");
@@ -156,77 +135,35 @@ function scrubUnitSpecificRemainders(text: string): string {
   return t;
 }
 
-/* ---------- generic compliance fix（禁止/不当/商標の中立化） ---------- */
-const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-function scrubGenericByIssues(text: string, issues: CheckIssue[]): string {
-  let out = text;
-  for (const i of issues) {
-    if (i.id.startsWith("unit-")) continue; // 住戸系は別ルートで対応
-    if (!i.excerpt) continue;
-    out = out.replace(new RegExp(escRe(i.excerpt), "g"), "");
+/* ---------- 投機/価値向上の除去 + 語尾の整え ---------- */
+const INVEST_SENT_RE = /(資産?価値|価値).{0,8}(高い|向上|上昇|上がる|期待|見込)|将来(?:値上がり|価値上昇)/g;
+
+function tidyJapanese(text: string, tone: string): string {
+  let t = text;
+
+  // 投機・価値向上を含む文は丸ごと削除（安全側）
+  t = t.replace(/[^。]*?(?:資産?価値|価値|将来(?:値上がり|価値上昇))[^。]*。/g, (m) =>
+    INVEST_SENT_RE.test(m) ? "" : m
+  );
+
+  // 連続句点・空白
+  t = t.replace(/。+\s*。/g, "。").replace(/\s{2,}/g, " ");
+
+  // 変な連結
+  t = t.replace(/ましたです。/g, "ました。");
+
+  // 語尾（一般・親しみ → 敬体ベース）
+  if (tone === "一般的" || tone === "親しみやすい") {
+    t = t
+      .replace(/(?<!てい)ている。/g, "ています。")
+      .replace(/である。/g, "です。");
   }
-  // 代表的な語の微調整（文法崩れの緩和）
-  out = out.replace(/のの/g, "の").replace(/、、+/g, "、").replace(/。\s*。+/g, "。").replace(/\s{2,}/g, " ").trim();
-  return out;
-}
-
-async function rewriteForCompliance(openai: OpenAI, text: string, tone: string, style: string, min: number, max: number, issues: CheckIssue[]) {
-  const targets = Array.from(new Set(issues.filter(i => !i.id.startsWith("unit-")).map(i => i.excerpt).filter(Boolean))).slice(0, 30);
-  if (!targets.length) return text;
-  const r = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.1,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system",
-        content:
-          'Return ONLY {"rewritten": string}. (json)\n' +
-          "役割: 不動産広告の校正者。禁止用語/不当表示（優良・有利誤認/過度な強調/二重価格）や商標名を削除/中立化し、文として自然に繋ぐ。\n" +
-          `トーン:${tone}\nスタイル:\n${style}\n` +
-          `文字数:${min}〜${max}（全角）。事実の新規追加/誇張は禁止。価格/金額/電話番号/外部URLを出力しない。\n` +
-          `削除・中立化の対象語句例:\n- ${targets.join(" / ")}` },
-      { role: "user", content: JSON.stringify({ text }) }
-    ]
-  });
-  try { return String(JSON.parse(r.choices?.[0]?.message?.content || "{}")?.rewritten || text); }
-  catch { return text; }
-}
-
-/* ---------- phrase throttle & subject fix ---------- */
-function throttlePhrases(text: string): string {
-  const buckets: Array<{ lex: RegExp; repls: string[]; maxKeep: number }> = [
-    { lex: /整って(?:い)?ます?/g, repls: ["備わっています", "用意されています", "整備されています", "あります"], maxKeep: 1 },
-    { lex: /整い/g,               repls: ["備え", "体制があり", "環境があり"], maxKeep: 1 },
-    { lex: /提供(?:し|して)います?/g, repls: ["設けています", "用意しています", "行っています"], maxKeep: 1 },
-    { lex: /採用(?:し|して)います?/g, repls: ["用いています", "取り入れています"], maxKeep: 1 },
-    { lex: /実現(?:し|して)います?/g, repls: ["かなえています", "形にしています"], maxKeep: 0 },
-  ];
-  let out = text;
-  for (const b of buckets) {
-    let m: RegExpExecArray | null;
-    const idxs: number[] = [];
-    const re = new RegExp(b.lex.source, "g");
-    while ((m = re.exec(out))) idxs.push(m.index);
-    if (idxs.length <= b.maxKeep) continue;
-    let used = 0, ri = 0;
-    out = out.replace(b.lex, (w) => (++used <= b.maxKeep) ? w : (b.repls[ri++ % b.repls.length]));
+  // 上品：名詞止めを残すので最小限だけ
+  if (tone === "上品・落ち着いた") {
+    t = t.replace(/ましたです。/g, "ました。");
   }
-  return out;
-}
 
-function deTautologyAndSubjectFix(text: string): string {
-  return text
-    .replace(/敷地は鉄筋コンクリート造/g, "建物は鉄筋コンクリート造")
-    .replace(/総戸数は(\d+)戸を誇ります/g, "総戸数は$1戸です")
-    .replace(/理想的/g, "快適")
-    .replace(/\s{2,}/g, " ");
-}
-
-/* ---------- 壊れた語尾の応急修正 ---------- */
-function fixTruncatedEndings(text: string): string {
-  return text
-    .replace(/(て|で)い。/g, "$1いる。")
-    .replace(/し。/g, "する。");
+  return t.trim();
 }
 
 /** 文字数調整（最大3回） */
@@ -257,39 +194,6 @@ async function ensureLengthReview(opts: {
     if (countJa(out) > opts.max) out = hardCapJa(out, opts.max);
   }
   return out;
-}
-
-/* ---------- Polish（仕上げ） ---------- */
-async function polishText(openai: OpenAI, text: string, tone: string, style: string, min: number, max: number) {
-  const sys =
-    'Return ONLY {"polished": string, "notes": string[]}. (json)\n' +
-    [
-      "あなたは日本語の不動産コピーの校閲・整文エディタです。",
-      "目的: 重複の削減、冗長表現の整理、段落のつながりの改善、語尾の単調回避（名詞止め/常体/敬体の配合）。",
-      "禁止: 事実の新規追加・推測・誇張・数値の創作、住戸特定（階数/向き/角住戸/帖・㎡/1LDK等）の再導入。",
-      "禁止: 価格/金額/円/万円・電話番号・外部URLの出力。",
-      `トーン:${tone}。以下のスタイルに準拠：\n${style}`,
-      `文字数:${min}〜${max}（全角）を厳守。`
-    ].join("\n");
-
-  const r = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.2,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: sys },
-      { role: "user", content: JSON.stringify({ text }) }
-    ]
-  });
-
-  try {
-    const obj = JSON.parse(r.choices?.[0]?.message?.content || "{}");
-    const polished = typeof obj?.polished === "string" ? obj.polished : text;
-    const notes = Array.isArray(obj?.notes) ? obj.notes.slice(0, 8) : [];
-    return { polished, notes };
-  } catch {
-    return { polished: text, notes: [] };
-  }
 }
 
 /* ---------- handler ---------- */
@@ -365,12 +269,10 @@ export async function POST(req: Request) {
     improved = stripPriceAndSpaces(improved);
     improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE, request });
 
-    // ④ 文字数最終 & ⑤ リズム＋言い換え
+    // ④ 文字数最終 & ⑤ リズム + 日本語整え
     if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
-    improved = deTautologyAndSubjectFix(improved);
-    improved = throttlePhrases(improved);
     improved = enforceCadence(improved, tone);
-    improved = fixTruncatedEndings(improved);
+    improved = tidyJapanese(improved, tone);
     if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
 
     // ⑥ チェック（Before：表示用）
@@ -379,95 +281,51 @@ export async function POST(req: Request) {
       ? issues_structured_before.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`)
       : issuesTextFromModel;
 
-    // ⑦ 自動修正（住戸特定 → 一般の禁止/不当/商標）
+    // ⑦ 住戸特定があれば自動修正
     let auto_fixed = false;
-
-    // a) 住戸特定（buildingのみ）
     if (scope === "building" && needsUnitFix(issues_structured_before)) {
       auto_fixed = true;
-      improved = await rewriteForBuilding(openai, improved, tone, STYLE_GUIDE, minChars, maxChars, issues_structured_before);
+      // 住戸特定用の書き直し（モデル）
+      const forbid = Array.from(new Set(issues_structured_before.map(i => i.excerpt).filter(Boolean))).slice(0, 20);
+      const rFix = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system",
+            content:
+              'Return ONLY {"rewritten": string}. (json)\n' +
+              `役割: 不動産の「棟紹介」ライター。住戸特定情報（階数/向き/角住戸/帖・㎡/具体的間取り型など）を削除・一般化する。\n` +
+              `トーン:${tone}\nスタイル:\n${STYLE_GUIDE}\n` +
+              `要件: 文字数は${minChars}〜${maxChars}（全角）。固有の事実を創作しない。価格/金額/電話番号/外部URLは禁止。\n` +
+              `以下の語句や数値は本文から削除・一般化の対象:\n- ${forbid.join(" / ")}` },
+          { role: "user", content: JSON.stringify({ text: improved }) }
+        ]
+      });
+      try { improved = String(JSON.parse(rFix.choices?.[0]?.message?.content || "{}")?.rewritten || improved); }
+      catch { /* keep */ }
       improved = scrubUnitSpecificRemainders(improved);
-      improved = deTautologyAndSubjectFix(improved);
-      improved = throttlePhrases(improved);
       improved = enforceCadence(improved, tone);
-      improved = fixTruncatedEndings(improved);
+      improved = tidyJapanese(improved, tone);
       if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
       if (countJa(improved) < minChars) {
         improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
+        improved = tidyJapanese(improved, tone);
       }
     }
 
-    // b) 一般の禁止/不当/商標（例：「人気の」「新築同様」「ディズニーランド」等）
-    let issues_after_unit = checkText(improved, { scope });
-    const hasGenericViolations = issues_after_unit.some(i => !i.id.startsWith("unit-"));
-    if (hasGenericViolations) {
-      auto_fixed = true;
-      // まず機械的に該当語を除去（安全側）
-      improved = scrubGenericByIssues(improved, issues_after_unit);
-      // さらにモデルで自然な文へ接続・中立化
-      improved = await rewriteForCompliance(openai, improved, tone, STYLE_GUIDE, minChars, maxChars, issues_after_unit);
-      improved = stripPriceAndSpaces(improved);
-      improved = deTautologyAndSubjectFix(improved);
-      improved = throttlePhrases(improved);
-      improved = enforceCadence(improved, tone);
-      improved = fixTruncatedEndings(improved);
-      if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
-      if (countJa(improved) < minChars) {
-        improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
-      }
-    }
-
-    // ⑧ 再チェック（After：Polish前）
-    const issues_structured_after_check: CheckIssue[] = checkText(improved, { scope });
-    const issues_after: string[] = issues_structured_after_check.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`);
-
-    // 中間テキスト（右の2枠目）
-    const text_after_check = improved;
-
-    // ⑨ 仕上げ（Polish）：違反が出たら採用しない
-    let polish_applied = false;
-    let polish_notes: string[] = [];
-    let text_after_polish: string | null = null;
-
-    {
-      const { polished, notes } = await polishText(openai, improved, tone, STYLE_GUIDE, minChars, maxChars);
-      let candidate = stripPriceAndSpaces(polished);
-      candidate = scrubUnitSpecificRemainders(candidate);
-      candidate = scrubGenericByIssues(candidate, checkText(candidate, { scope })); // 念のため
-      candidate = deTautologyAndSubjectFix(candidate);
-      candidate = throttlePhrases(candidate);
-      candidate = enforceCadence(candidate, tone);
-      candidate = fixTruncatedEndings(candidate);
-      if (countJa(candidate) > maxChars) candidate = hardCapJa(candidate, maxChars);
-      if (countJa(candidate) < minChars) {
-        candidate = await ensureLengthReview({ openai, draft: candidate, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
-      }
-
-      const checkAfterPolish = checkText(candidate, { scope });
-      if (!checkAfterPolish.length) {
-        improved = candidate;
-        polish_applied = true;
-        polish_notes = notes;
-        text_after_polish = candidate; // 右の3枠目に表示
-      }
-    }
-
-    // ⑩ 最終チェック（念のため）
-    const issues_structured_final: CheckIssue[] = checkText(improved, { scope });
+    // ⑧ 再チェック（After）
+    const issues_structured_after: CheckIssue[] = checkText(improved, { scope });
+    const issues_after: string[] = issues_structured_after.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`);
 
     return new Response(JSON.stringify({
       ok: true,
-      improved,                 // 最終版
-      text_after_check,         // 右②
-      text_after_polish,        // 右③（未採用なら null）
-      issues: issues_before,    // 互換（Before）
-      issues_before,
-      issues_after,             // After（Polish前）
+      improved,
+      issues: issues_before,                         // 従来互換（Before）
+      issues_before, issues_after,
       issues_structured_before,
-      issues_structured: issues_structured_final,
+      issues_structured: issues_structured_after,    // After（残違反）
       auto_fixed,
-      polish_applied,
-      polish_notes,
       summary: summary || (issuesTextFromModel.length ? issuesTextFromModel.join(" / ") : "")
     }), { status: 200, headers: { "content-type": "application/json" } });
 
