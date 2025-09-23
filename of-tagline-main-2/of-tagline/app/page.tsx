@@ -1,116 +1,92 @@
 // app/page.tsx
 "use client";
 
-import React, { useMemo, useState, useEffect, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
 
-/* ========= small utils ========= */
+/* ========= tiny utils ========= */
 const cn = (...a: (string | false | null | undefined)[]) => a.filter(Boolean).join(" ");
 const jaLen = (s: string) => Array.from(s || "").length;
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
-const parseWords = (src: string) =>
-  String(src || "").split(/[ ,、\s\n/]+/).map((s) => s.trim()).filter(Boolean);
 const escapeHtml = (s: string) =>
   String(s ?? "")
     .replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+const parseWords = (src: string) =>
+  String(src || "").split(/[ ,、\s\n/]+/).map(s => s.trim()).filter(Boolean);
+const validUrl = (s: string) => /^https?:\/\/\S+/i.test(String(s || "").trim());
 
-/** LCSベースの差分（挿入/変更部分を <mark> 赤表示） */
-function markDiffRed(original: string, improved: string) {
-  const A = Array.from(original || "");
-  const B = Array.from(improved || "");
+/** LCSベースの差分（②→③で追加/変更になった文字を赤ハイライト） */
+function markDiffRed(a: string, b: string) {
+  const A = Array.from(a || "");
+  const B = Array.from(b || "");
   const n = A.length, m = B.length;
   const dp: number[][] = Array.from({ length: n + 1 }, () => Array(m + 1).fill(0));
   for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--)
     dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+
   const out: string[] = [];
   let i = 0, j = 0;
   while (i < n && j < m) {
     if (A[i] === B[j]) { out.push(escapeHtml(B[j])); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { i++; } // 削除は赤にしない
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { i++; } // 削除は表示しない
     else { out.push(`<mark class="bg-red-50 text-red-600">${escapeHtml(B[j++])}</mark>`); }
   }
   while (j < m) out.push(`<mark class="bg-red-50 text-red-600">${escapeHtml(B[j++])}</mark>`);
   return out.join("");
 }
 
-/* ========= readability meter ========= */
-const JA_SENT_SPLIT = /(?<=[。！？\?])\s*(?=[^\s])/g;
-const splitJa = (t: string) => (t || "").replace(/\s+\n/g, "\n").trim().split(JA_SENT_SPLIT).map(s=>s.trim()).filter(Boolean);
-const politeEnd = (s: string) => /(です|ます)(?:。|$)/.test(s);
-const nounStop = (s: string) => /[。！？]?$/.test(s) && !/(です|ます)(?:。|$)/.test(s); // ざっくり
+/* ========= readability (簡易) ========= */
+const SPLIT = /(?<=[。！？\?])\s*(?=[^\s])/g;
+const splitJa = (t: string) => (t || "").replace(/\s+\n/g, "\n").trim().split(SPLIT).map(s=>s.trim()).filter(Boolean);
+const endPolite = (s: string) => /(です|ます)(?:。|$)/.test(s);
+const endNoun   = (s: string) => !endPolite(s) && /[。！？]?$/.test(s);
 
 function readability(text: string) {
   const ss = splitJa(text);
   const n = ss.length || 1;
   const avg = ss.reduce((a, s) => a + jaLen(s), 0) / n;
-  const pPolite = ss.filter(politeEnd).length / n;
-  const pNoun = ss.filter(nounStop).length / n;
-
-  // よく使い過ぎる語の簡易スコア
+  const pPolite = ss.filter(endPolite).length / n;
+  const pNoun = ss.filter(endNoun).length / n;
   const repeats = ["整って", "整い", "提供", "採用", "実現", "可能", "快適"].reduce((acc, w) => {
-    const m = text.match(new RegExp(w, "g"))?.length ?? 0;
-    return acc + Math.max(0, m - 2); // 2回超過分をカウント
+    const c = text.match(new RegExp(w, "g"))?.length ?? 0;
+    return acc + Math.max(0, c - 2);
   }, 0);
-
-  // 簡易グレード
-  let grade: "A"|"B"|"C" = "B";
+  let grade = "B";
   if (avg <= 70 && pPolite >= 0.5 && pPolite <= 0.75 && pNoun <= 0.35 && repeats <= 2) grade = "A";
   if (avg > 95 || repeats >= 5) grade = "C";
-
-  return {
-    grade,
-    detail: `敬体 ${(pPolite*100)|0}% / 名詞止め ${(pNoun*100)|0}% / 平均文長 ${avg.toFixed(0)}字 / 重複語 ${repeats}`,
-    numbers: { pPolite, pNoun, avg, repeats }
-  };
+  return { grade, detail: `敬体 ${(pPolite*100|0)}% / 名詞止め ${(pNoun*100|0)}% / 平均文長 ${avg.toFixed(0)}字 / 重複語 ${repeats}` };
 }
 
-/* ========= types from /api/review ========= */
-type CheckIssue = {
-  id: string;
-  label: string;
-  category: "禁止用語" | "不当表示" | "商標";
-  severity: "error" | "warn";
-  start: number; end: number;
-  excerpt: string;
-  message: string;
+/* ========= types ========= */
+type Tone = "上品・落ち着いた" | "一般的" | "親しみやすい";
+type CheckStatus = "idle" | "running" | "done" | "error";
+type Issue = {
+  id: string; label: string; category: "禁止用語" | "不当表示" | "商標";
+  severity: "error" | "warn"; start: number; end: number; excerpt: string; message: string;
 };
 
-/* ========= highlight renderer ========= (title属性=標準ツールチップ) */
-function renderWithHighlights(text: string, issues: CheckIssue[]) {
+/* 本文＋ハイライト（②/③に使用） */
+function renderWithHighlights(text: string, issues: Issue[]) {
   if (!text) return "";
   if (!issues?.length) return escapeHtml(text).replace(/\n/g, "<br/>");
-
-  const segs: { s: number; e: number; tip: string }[] =
-    [...issues]
-      .sort((a,b)=> a.start-b.start || b.end-a.end)
-      .map(i => ({ s: Math.max(0, i.start), e: Math.min(text.length, i.end), tip: `${i.category} / ${i.label}：${i.message}` }));
-
+  const segs = [...issues].sort((a,b)=> a.start-b.start || b.end-a.end)
+    .map(i => ({ s: Math.max(0, i.start), e: Math.min(text.length, i.end), tip: `${i.category} / ${i.label}：${i.message}` }));
   const out: string[] = [];
   let cur = 0;
   for (const g of segs) {
     if (g.s > cur) out.push(escapeHtml(text.slice(cur, g.s)));
     const frag = escapeHtml(text.slice(g.s, g.e));
-    out.push(
-      `<span class="underline decoration-red-400 decoration-2 underline-offset-[3px] text-red-700" title="${escapeHtml(g.tip)}">${frag}</span>`
-    );
+    out.push(`<span class="underline decoration-red-400 decoration-2 underline-offset-[3px] text-red-700" title="${escapeHtml(g.tip)}">${frag}</span>`);
     cur = g.e;
   }
   if (cur < text.length) out.push(escapeHtml(text.slice(cur)));
   return out.join("").replace(/\n/g, "<br/>");
 }
 
-/* ========= page state ========= */
-type CheckStatus = "idle" | "running" | "done" | "error";
-const tones = ["上品・落ち着いた", "一般的", "親しみやすい"] as const;
-type Tone = typeof tones[number];
-
-/* 6段階ステップ */
-type Step = "idle" | "generating" | "gen_done" | "checking" | "check_done" | "polishing" | "done";
-
 /* ========= component ========= */
 export default function Page() {
-  /* 単件入力 */
+  /* 入力 */
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [mustInput, setMustInput] = useState("");
@@ -120,202 +96,200 @@ export default function Page() {
   const [minChars, setMinChars] = useState(450);
   const [maxChars, setMaxChars] = useState(550);
 
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
   /* 出力①②③ */
-  const [text1, setText1] = useState("");
-  const [text2, setText2] = useState("");
-  const [text3, setText3] = useState("");
-  const [polishNote, setPolishNote] = useState(""); // 「Polish不要（自動判断）」の表示
+  const [text1, setText1] = useState(""); // 初回生成
+  const [text2, setText2] = useState(""); // 自動チェック後
+  const [text3, setText3] = useState(""); // 仕上げ（または不要メッセージ）
 
-  /* 差分 */
-  const [diff12Html, setDiff12Html] = useState("");
-  const [diff23Html, setDiff23Html] = useState("");
-
-  /* 検出（構造化） */
-  const [issues2Structured, setIssues2Structured] = useState<CheckIssue[]>([]);
-  const [issues3Structured, setIssues3Structured] = useState<CheckIssue[]>([]);
+  /* 検出 */
   const [issues2, setIssues2] = useState<string[]>([]);
+  const [issues2Struct, setIssues2Struct] = useState<Issue[]>([]);
   const [issues3, setIssues3] = useState<string[]>([]);
+  const [issues3Struct, setIssues3Struct] = useState<Issue[]>([]);
   const [summary2, setSummary2] = useState("");
   const [summary3, setSummary3] = useState("");
 
-  const [checkStatus, setCheckStatus] = useState<CheckStatus>("idle");
+  /* 差分（②→③） */
+  const [diff23Html, setDiff23Html] = useState("");
 
-  /* ステップ進行 */
-  const [step, setStep] = useState<Step>("idle");
-  const stepActive = (s: Step) => {
-    const order: Step[] = ["idle","generating","gen_done","checking","check_done","polishing","done"];
-    return order.indexOf(step) >= order.indexOf(s);
-  };
+  /* ステータス */
+  const [checkStatus, setCheckStatus] = useState<CheckStatus>("idle");
+  // 0:未開始 1:生成開始 2:初回生成完了 3:自動チェック中 4:チェック完了 5:仕上げ中 6:完了
+  const [step, setStep] = useState(0);
+
+  /* 便利 */
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const currentText = text3 || text2 || text1;
 
   /* 読みやすさ */
   const r1 = useMemo(()=> readability(text1), [text1]);
   const r2 = useMemo(()=> readability(text2), [text2]);
   const r3 = useMemo(()=> readability(text3), [text3]);
 
-  const validUrl = (s: string) => /^https?:\/\/\S+/i.test(String(s || "").trim());
-  const currentText = text3 || text2 || text1;
+  const copy = async (s: string) => { try { await navigator.clipboard.writeText(s); } catch {} };
 
-  /* ------------ 生成（完了後に自動チェック→必要なら自動Polish） ------------ */
+  /* ==== 生成（①） → 自動チェック（②） ==== */
   async function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-
-    // 新しい流れ → リセット
-    setText1(""); setText2(""); setText3(""); setPolishNote("");
-    setDiff12Html(""); setDiff23Html("");
-    setIssues2([]); setIssues3([]); setIssues2Structured([]); setIssues3Structured([]);
-    setSummary2(""); setSummary3("");
-    setCheckStatus("idle"); setStep("generating");
+    setText1(""); setText2(""); setText3("");
+    setIssues2([]); setIssues3([]); setIssues2Struct([]); setIssues3Struct([]);
+    setSummary2(""); setSummary3(""); setDiff23Html("");
+    setCheckStatus("idle"); setStep(0);
 
     try {
       if (!name.trim()) throw new Error("物件名を入力してください。");
       if (!validUrl(url)) throw new Error("正しい物件URLを入力してください。");
       if (minChars > maxChars) throw new Error("最小文字数は最大文字数以下にしてください。");
 
-      setBusy(true);
-
-      // ① 初回生成
+      setBusy(true); setStep(1); // 生成開始
       const r0 = await fetch("/api/describe", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, url, mustWords: mustInput, tone, minChars, maxChars }),
+        method:"POST", headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ name, url, mustWords: mustInput, tone, minChars, maxChars })
       });
       const j0 = await r0.json();
       if (!r0.ok) throw new Error(j0?.error || "生成に失敗しました。");
-      const generated = String(j0?.text || "");
-      setText1(generated);
-      setStep("gen_done");
+      setText1(String(j0?.text || ""));
+      setStep(2); // 初回生成完了
 
-      // ② 自動チェック
-      await handleCheck(generated, /*suppressBusy*/ true);
+      await runCheck(String(j0?.text || ""));
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
-      setCheckStatus("error"); setStep("idle");
+      setCheckStatus("error");
     } finally {
       setBusy(false);
     }
   }
 
-  /* ------------ チェック（②） ------------ */
-  async function handleCheck(baseText?: string, suppressBusy = false) {
+  async function runCheck(baseText?: string) {
+    const src = (baseText ?? text1).trim();
+    if (!src) throw new Error("まず①の文章を生成してください。");
+
+    setCheckStatus("running"); setStep(3); // 自動チェック中
+    setIssues2([]); setIssues2Struct([]); setSummary2("");
+
+    const res = await fetch("/api/review", {
+      method:"POST", headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({
+        text: src, name, url, mustWords: mustInput,
+        tone, minChars, maxChars, scope: "building"
+      })
+    });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j?.error || "チェックに失敗しました。");
+
+    const improved = String(j?.improved ?? src);
+    const before = Array.isArray(j?.issues_structured_before) ? j.issues_structured_before as Issue[] : [];
+    const issues = Array.isArray(j?.issues) ? j.issues as string[] : [];
+    setText2(improved);
+    setIssues2(issues);
+    setIssues2Struct(before);
+    setSummary2(j?.summary || (issues.length ? issues.join(" / ") : ""));
+    setCheckStatus("done"); setStep(4); // チェック完了
+
+    // Polish必要判定：違反あり or 読みやすさC なら実行
+    const needPolish = (before.length > 0) || readability(improved).grade === "C";
+    if (needPolish) {
+      await autoPolish();
+    } else {
+      setText3("— Polish不要（チェック段階で要件クリア／読みやすさ良好）—");
+      setSummary3("");
+      setIssues3([]); setIssues3Struct([]);
+      setDiff23Html("");
+      setStep(6); // 完了
+    }
+  }
+
+  /* ==== 仕上げ（③） ==== */
+  async function autoPolish() {
+    setStep(5); // 仕上げ中
     try {
-      const src = (baseText ?? text1).trim();
-      if (!src) throw new Error("まず①の文章を生成してください。");
-      if (!suppressBusy) setBusy(true);
-
-      setCheckStatus("running"); setStep("checking");
-      setIssues2([]); setSummary2(""); setDiff12Html(""); setIssues2Structured([]);
-
-      const res = await fetch("/api/review", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: src, name, url, mustWords: mustInput, tone, minChars, maxChars,
-          scope: "building"
-        }),
-      });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || "チェックに失敗しました。");
-
-      const improved = String(j?.improved ?? src);
-      const issues = Array.isArray(j?.issues) ? j.issues : [];
-      const summary = j?.summary || (issues.length ? issues.join(" / ") : "");
-      const issuesStructuredBefore = Array.isArray(j?.issues_structured_before) ? j.issues_structured_before : [];
-      const issuesStructuredAfter  = Array.isArray(j?.issues_structured) ? j.issues_structured : [];
-
-      setText2(improved);
-      setIssues2(issues);
-      setIssues2Structured(issuesStructuredBefore.length ? issuesStructuredBefore : issuesStructuredAfter);
-      setSummary2(summary);
-      setDiff12Html(markDiffRed(src, improved));
-      setCheckStatus("done"); setStep("check_done");
-
-      // 自動Polishの要否判定：違反が残る or 読みやすさがAでない
-      const needPolish = (issuesStructuredAfter.length > 0) || readability(improved).grade !== "A";
-
-      if (needPolish) {
-        await handlePolish(/*auto*/true);
-      } else {
-        setPolishNote("Polish不要（自動判断）");
-        setStep("done");
+      await runPolish(false);
+      setStep(6); // 完了
+    } catch {
+      // 1回だけ自動リトライ
+      try {
+        await runPolish(true);
+        setStep(6);
+      } catch (e) {
+        setError("仕上げに失敗しました。もう一度お試しください。");
+        setStep(4); // 戻す
       }
-    } catch (err: any) {
-      setError(err?.message || "エラーが発生しました。");
-      setCheckStatus("error"); setStep("idle");
-    } finally {
-      if (!suppressBusy) setBusy(false);
     }
   }
 
-  /* ------------ 仕上げ（③） ------------ */
-  async function handlePolish(auto = false) {
-    setError(null);
-    setIssues3([]); setSummary3(""); setDiff23Html(""); setIssues3Structured([]);
+  async function runPolish(isRetry: boolean) {
+    const res = await fetch("/api/review", {
+      method:"POST", headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({
+        text: text2, name, url, mustWords: mustInput,
+        tone, minChars, maxChars, scope: "building"
+      })
+    });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j?.error || "仕上げに失敗しました。");
+
+    const improved = String(j?.improved ?? text2);
+    const issuesAfter = Array.isArray(j?.issues_after) ? (j.issues_after as string[]) : [];
+    const structAfter = Array.isArray(j?.issues_structured) ? (j.issues_structured as Issue[]) : [];
+    setText3(improved);
+    setIssues3(issuesAfter);
+    setIssues3Struct(structAfter);
+    setSummary3(j?.summary || (issuesAfter.length ? issuesAfter.join(" / ") : ""));
+    setDiff23Html(markDiffRed(text2, improved));
+  }
+
+  async function handleCheckClick() {
     try {
-      if (!text2.trim()) throw new Error("まず②のチェックを完了してください。");
-
-      setBusy(true); setStep("polishing");
-      const res = await fetch("/api/review", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: text2, name, url, mustWords: mustInput, tone, minChars, maxChars,
-          scope: "building"
-        }),
-      });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || "仕上げに失敗しました。");
-
-      const improved = String(j?.improved ?? text2);
-      const issuesAfter = Array.isArray(j?.issues_after) ? j.issues_after : [];
-      const issuesStructuredAfter = Array.isArray(j?.issues_structured) ? j.issues_structured : [];
-      const summary = j?.summary || (issuesAfter.length ? issuesAfter.join(" / ") : "");
-
-      setText3(improved);
-      setIssues3(issuesAfter);
-      setIssues3Structured(issuesStructuredAfter);
-      setSummary3(summary);
-      setDiff23Html(markDiffRed(text2, improved));
-      setPolishNote(""); setStep("done");
+      setBusy(true);
+      await runCheck();
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
-      if (auto) setPolishNote("Polish自動実行に失敗しました（手動実行してください）");
-      setStep("check_done");
+      setCheckStatus("error");
     } finally {
       setBusy(false);
     }
   }
 
-  /* ------------ クリア ------------ */
+  async function handlePolishClick() {
+    try {
+      setBusy(true);
+      await autoPolish();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function handleReset() {
     setName(""); setUrl(""); setMustInput("");
     setTone("上品・落ち着いた"); setMinChars(450); setMaxChars(550);
-    setText1(""); setText2(""); setText3(""); setPolishNote("");
-    setDiff12Html(""); setDiff23Html("");
-    setIssues2([]); setIssues3([]); setIssues2Structured([]); setIssues3Structured([]);
-    setSummary2(""); setSummary3("");
-    setError(null); setCheckStatus("idle"); setStep("idle");
+    setText1(""); setText2(""); setText3("");
+    setIssues2([]); setIssues3([]); setIssues2Struct([]); setIssues3Struct([]);
+    setSummary2(""); setSummary3(""); setDiff23Html("");
+    setCheckStatus("idle"); setStep(0); setError(null);
   }
 
-  const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch {} };
-
-  /* ステータスバッジ */
-  const StepChip = ({label, active}:{label:string;active:boolean}) => (
-    <span className={cn(
-      "px-2 py-0.5 rounded-full text-xs border whitespace-nowrap",
-      active ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-neutral-50 text-neutral-600 border-neutral-200"
-    )}>{label}{active ? " ✔" : ""}</span>
+  /* ステップチップ */
+  const stepChip = (label: string, idx: number) => (
+    <span
+      key={label}
+      className={cn(
+        "px-2 py-0.5 rounded-full text-[11px] border select-none",
+        step >= idx ? "bg-emerald-50 text-emerald-700 border-emerald-200" : "bg-neutral-50 text-neutral-600 border-neutral-200"
+      )}
+    >
+      {label}{step >= idx ? " ✔" : ""}
+    </span>
   );
 
-  /* 自動チェックの表示 */
+  /* ステータスバッジ */
   const statusLabel =
-    checkStatus === "running" ? "実行中…" :
-    checkStatus === "done"    ? "完了" :
-    checkStatus === "error"   ? "エラー" : "未実行";
-  const statusClass =
-    checkStatus === "running" ? "bg-yellow-100 text-yellow-700" :
-    checkStatus === "done"    ? "bg-emerald-100 text-emerald-700" :
-    checkStatus === "error"   ? "bg-red-100 text-red-700" : "bg-neutral-100 text-neutral-600";
+    step <= 1 ? "生成開始" :
+    step === 2 ? "初回生成完了" :
+    step === 3 ? "自動チェック中" :
+    step === 4 ? "チェック完了" :
+    step === 5 ? "仕上げ中" : "完了";
 
   /* ========= UI ========= */
   return (
@@ -323,30 +297,17 @@ export default function Page() {
       <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b">
         <div className="max-w-7xl mx-auto px-5 py-3 flex items-center justify-between gap-3">
           <div className="text-lg font-semibold">マンション説明文作成</div>
-
-          {/* 6段階ステータス */}
           <div className="hidden md:flex items-center gap-2">
-            <StepChip label="生成開始"      active={stepActive("generating")} />
-            <StepChip label="初回生成完了"  active={stepActive("gen_done")} />
-            <StepChip label="自動チェック中" active={stepActive("checking")} />
-            <StepChip label="チェック完了"  active={stepActive("check_done")} />
-            <StepChip label="仕上げ中"      active={stepActive("polishing")} />
-            <StepChip label="完了"          active={stepActive("done")} />
+            {[
+              "生成開始","初回生成完了","自動チェック中","チェック完了","仕上げ中","完了"
+            ].map((t, i) => stepChip(t, i+1))}
           </div>
-
-          {/* 管理ボタン（小さめ） */}
-          <div>
-            <Button type="button" className="text-xs px-2 py-1">管理</Button>
-          </div>
+          <div className="md:hidden text-xs px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">{statusLabel}</div>
         </div>
       </header>
 
-      {/* 進行ライン */}
-      <div className="bg-gradient-to-r from-emerald-500 via-yellow-400 to-neutral-200 h-1"
-           style={{ width: step === "done" ? "100%" : step === "polishing" ? "88%" : step === "check_done" ? "76%" : step === "checking" ? "64%" : step === "gen_done" ? "40%" : step === "generating" ? "20%" : "4%" }} />
-
       <main className="max-w-7xl mx-auto px-5 py-6 grid lg:grid-cols-[minmax(360px,500px)_1fr] gap-6">
-        {/* 左カラム：入力 */}
+        {/* ===== 左：入力・操作 ===== */}
         <form onSubmit={handleGenerate} className="space-y-4">
           <section className="bg-white rounded-2xl shadow p-4 space-y-3">
             <div className="grid gap-3">
@@ -355,15 +316,12 @@ export default function Page() {
                 <input className="border rounded-lg p-2" placeholder="例）パークタワー晴海"
                   value={name} onChange={(e)=>setName(e.target.value)} />
               </label>
-
               <label className="flex flex-col gap-1">
                 <span className="text-sm font-medium">物件URL</span>
                 <input className="border rounded-lg p-2" placeholder="https://..." value={url}
                   onChange={(e)=>setUrl(e.target.value)} />
-                {!url || /^https?:\/\//i.test(url) ? null :
-                  <span className="text-xs text-red-600">URLの形式が正しくありません。</span>}
+                {!url || validUrl(url) ? null : <span className="text-xs text-red-600">URLの形式が正しくありません。</span>}
               </label>
-
               <label className="flex flex-col gap-1">
                 <span className="text-sm font-medium">マストワード</span>
                 <textarea className="border rounded-lg p-2 min-h-[84px]"
@@ -371,14 +329,14 @@ export default function Page() {
                   onChange={(e)=>setMustInput(e.target.value)} />
                 <span className="text-xs text-neutral-500">認識語数：{mustWords.length}</span>
               </label>
-
               <label className="flex flex-col gap-1">
                 <span className="text-sm font-medium">トーン</span>
-                <select className="border rounded-lg p-2" value={tone} onChange={(e)=>setTone(e.target.value as Tone)}>
-                  {tones.map((t) => <option key={t} value={t}>{t}</option>)}
+                <select className="border rounded-lg p-2" value={tone} onChange={e=>setTone(e.target.value as Tone)}>
+                  <option>上品・落ち着いた</option>
+                  <option>一般的</option>
+                  <option>親しみやすい</option>
                 </select>
               </label>
-
               <div className="grid grid-cols-2 gap-3">
                 <label className="flex flex-col gap-1">
                   <span className="text-sm font-medium">最小文字数（全角）</span>
@@ -395,9 +353,9 @@ export default function Page() {
                 </div>
               </div>
 
-              <div className="flex gap-3">
+              <div className="flex gap-3 flex-wrap">
                 <Button type="submit" disabled={busy || !name || !url}>
-                  {busy && checkStatus !== "running" ? "処理中…" : "文章を生成"}
+                  {busy && step < 2 ? "処理中…" : "文章を生成"}
                 </Button>
                 <Button type="button" color="orange" onClick={handleReset}>リセット</Button>
               </div>
@@ -406,101 +364,122 @@ export default function Page() {
             </div>
           </section>
 
-          {/* チェック＆仕上げ（常時表示 / 1行レイアウト / 注釈は見出し横に小さく） */}
+          {/* チェック＆仕上げ（1行ボタン / 小さな説明付） */}
           <section className="bg-white rounded-2xl shadow p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div className="text-sm font-medium">
-                チェック＆仕上げ
-                <span className="ml-2 text-xs text-neutral-500">初回生成後に自動実行</span>
+                チェック＆仕上げ <span className="text-xs text-neutral-500">初回生成後に自動実行</span>
               </div>
-              <div className="flex items-center gap-2 whitespace-nowrap">
-                <span className={cn("px-2 py-0.5 rounded-full text-xs", statusClass)}>{statusLabel}</span>
-                <Button type="button" onClick={()=>handleCheck()} disabled={busy || !text1} className="px-2 py-1 h-7 text-xs">再実行</Button>
-                <Button type="button" onClick={()=>handlePolish(false)} disabled={busy || !text2} className="px-2 py-1 h-7 text-xs">仕上げ</Button>
+              <div className="flex items-center gap-2 flex-nowrap">
+                <span className={cn(
+                  "px-2 py-0.5 rounded-full text-[11px] border",
+                  step >= 4 ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
+                  step === 3 ? "bg-yellow-50 text-yellow-700 border-yellow-200" :
+                  step >= 2 ? "bg-neutral-50 text-neutral-700 border-neutral-200" : "bg-neutral-50 text-neutral-400 border-neutral-200"
+                )}>
+                  {checkStatus === "running" ? "実行中…" : step >= 4 ? "完了" : "未実行"}
+                </span>
+                <Button type="button" className="px-3 py-1 text-xs" onClick={handleCheckClick} disabled={busy || !text1}>再実行</Button>
+                <Button type="button" className="px-3 py-1 text-xs" onClick={handlePolishClick} disabled={busy || !text2}>仕上げ</Button>
               </div>
             </div>
 
-            {/* チェック要点（② Beforeリストを残す） */}
-            {(issues2.length > 0) && (
-              <div className="space-y-2">
+            {/* ②の要点リスト（従来の“理由”も残す） */}
+            {issues2.length > 0 && (
+              <div className="rounded-lg border bg-neutral-50 p-3">
+                <div className="text-xs text-neutral-500 mb-2">違反が残っているため仕上げを推奨します。</div>
                 <ul className="text-sm list-disc pl-5 space-y-1">
                   {issues2.map((it, i) => <li key={i}>{it}</li>)}
                 </ul>
-                {!!summary2 && <div className="text-xs text-neutral-500">要約: {summary2}</div>}
               </div>
             )}
           </section>
         </form>
 
-        {/* 右カラム：3出力 */}
+        {/* ===== 右：3出力 ===== */}
         <section className="space-y-4">
-          {/* 出力① */}
-          <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
-            <div className="p-4 border-b flex items-center justify-between gap-3">
+          {/* ① 初回生成 */}
+          <article className="bg-white rounded-2xl shadow min-h-[220px] overflow-hidden">
+            <header className="p-4 border-b flex items-center justify-between gap-3">
               <div className="text-sm font-medium">出力① 初回生成</div>
               <div className="flex items-center gap-2">
-                <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
-                  読みやすさ {r1.grade}
-                </span>
-                <div className="hidden md:block text-[11px] text-neutral-500">{r1.detail}</div>
+                <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">読みやすさ {r1.grade}</span>
+                <div className="text-[11px] text-neutral-500 hidden md:block">{r1.detail}</div>
                 <Button onClick={()=>copy(text1)} disabled={!text1}>コピー</Button>
               </div>
+            </header>
+            <div className="p-4">
+              {text1 ? <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text1}</p>
+                     : <div className="text-neutral-500 text-sm">— 未生成 —</div>}
             </div>
-            <div className="p-4 flex-1 overflow-auto">
-              {text1 ? (
-                <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text1}</p>
-              ) : (<div className="text-neutral-500 text-sm">— 未生成 —</div>)}
-            </div>
-          </div>
+          </article>
 
-          {/* 出力②（見出しをスッキリ / 本文は必要箇所に赤下線＋titleツールチップ） */}
-          <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
-            <div className="p-4 border-b flex items-center justify-between gap-3">
+          {/* ② 自動チェック結果（ヘッダーの但し書きは削除） */}
+          <article className="bg-white rounded-2xl shadow min-h-[220px] overflow-hidden">
+            <header className="p-4 border-b flex items-center justify-between gap-3">
               <div className="text-sm font-medium">出力② 自動チェック結果</div>
               <div className="flex items-center gap-2">
-                <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
-                  読みやすさ {r2.grade}
-                </span>
-                <div className="hidden md:block text-[11px] text-neutral-500">{r2.detail}</div>
+                <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">読みやすさ {r2.grade}</span>
+                <div className="text-[11px] text-neutral-500 hidden md:block">{r2.detail}</div>
                 <Button onClick={()=>copy(text2)} disabled={!text2}>コピー</Button>
               </div>
-            </div>
-            <div className="p-4 flex-1 overflow-auto">
+            </header>
+            <div className="p-4">
               {text2 ? (
                 <div className="text-[15px] leading-relaxed"
-                  dangerouslySetInnerHTML={{ __html: renderWithHighlights(text2, issues2Structured) }} />
-              ) : (<div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>)}
+                     dangerouslySetInnerHTML={{ __html: renderWithHighlights(text2, issues2Struct) }} />
+              ) : <div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>}
             </div>
-          </div>
+          </article>
 
-          {/* 出力③（Polish） */}
-          <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
-            <div className="p-4 border-b flex items-center justify-between gap-3">
+          {/* ③ 仕上げ（Polish）— 以前の仕様に戻し、理由や差分も表示 */}
+          <article className="bg-white rounded-2xl shadow min-h-[220px] overflow-hidden">
+            <header className="p-4 border-b flex items-center justify-between gap-3">
               <div className="text-sm font-medium">出力③ 仕上げ（Polish）</div>
               <div className="flex items-center gap-2">
-                <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">
-                  読みやすさ {r3.grade}
-                </span>
-                <div className="hidden md:block text-[11px] text-neutral-500">{r3.detail}</div>
+                <span className="text-[11px] px-2 py-0.5 rounded-full border bg-neutral-50 text-neutral-700">読みやすさ {r3.grade}</span>
+                <div className="text-[11px] text-neutral-500 hidden md:block">{r3.detail}</div>
                 <Button onClick={()=>copy(text3)} disabled={!text3}>コピー</Button>
               </div>
-            </div>
-            <div className="p-4 flex-1 overflow-auto">
-              {polishNote && !text3 && (
-                <div className="text-neutral-500 text-sm">— {polishNote} —</div>
-              )}
+            </header>
+            <div className="p-4 space-y-3">
               {text3 ? (
-                <div className="text-[15px] leading-relaxed"
-                  dangerouslySetInnerHTML={{ __html: renderWithHighlights(text3, issues3Structured) }} />
-              ) : (!polishNote ? (
-                <div className="text-neutral-500 text-sm">— まだPolish未実行 —</div>
-              ) : null)}
+                <>
+                  <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text3}</p>
+
+                  {/* 理由（ After ） */}
+                  {(issues3.length > 0 || summary3) && (
+                    <div className="rounded-lg border bg-neutral-50 p-3">
+                      {issues3.length > 0 && (
+                        <ul className="text-sm list-disc pl-5 space-y-1">
+                          {issues3.map((it, i) => <li key={i}>{it}</li>)}
+                        </ul>
+                      )}
+                      {!!summary3 && <div className="text-xs text-neutral-500 mt-1">要約: {summary3}</div>}
+                    </div>
+                  )}
+
+                  {/* ②→③ 差分（追加・変更は赤） */}
+                  {!!diff23Html && (
+                    <div className="rounded-lg border p-3">
+                      <div className="text-xs text-neutral-500 mb-1">差分（②→③、赤=追加/変更）</div>
+                      <div className="text-[15px] leading-relaxed"
+                        dangerouslySetInnerHTML={{ __html: diff23Html }} />
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="text-neutral-500 text-sm">
+                  — まだPolish未実行（Polish不要な場合は自動で「完了」になります） —
+                </div>
+              )}
             </div>
-          </div>
+          </article>
 
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
-              ※ PCはホバー、モバイルは長押しで理由や“元文”が表示されます。○は「違反」表示、●は「変更点」（赤=追加/置換、ホバーで元文）。
+              ※ <code>/api/describe</code> が初回文（①）を生成。<code>/api/review</code> がチェック（②）と仕上げ（③）を返します。<br/>
+              ※ PCはホバー、モバイルはタップで②の違反理由や元文が表示されます。
             </div>
           </div>
         </section>
