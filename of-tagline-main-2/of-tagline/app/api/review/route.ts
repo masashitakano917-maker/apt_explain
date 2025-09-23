@@ -21,6 +21,7 @@ function hardCapJa(s: string, max: number): string {
 
 const normMustWords = (src: unknown): string[] => {
   const s: string = Array.isArray(src) ? (src as unknown[]).map(String).join(" ") : String(src ?? "");
+  // 半角/全角スペース・カンマ・読点・改行・スラッシュで分割
   return s.split(/[ ,、\s\n\/]+/).map(w => w.trim()).filter(Boolean);
 };
 
@@ -185,6 +186,40 @@ async function ensureLengthReview(opts: {
   return out;
 }
 
+/* ---------- Polish（仕上げ） ---------- */
+/** 仕上げ（Polish）：冗長削減・接続改善・用字統一・軽微な言い換え（事実の新規追加や住戸特定の再導入は禁止） */
+async function polishText(openai: OpenAI, text: string, tone: string, style: string, min: number, max: number) {
+  const sys =
+    'Return ONLY {"polished": string, "notes": string[]}. (json)\n' +
+    [
+      "あなたは日本語の不動産コピーの校閲・整文エディタです。",
+      "目的: 重複の削減、冗長表現の整理、段落のつながりの改善、語尾の単調回避（名詞止め/常体/敬体の配合）。",
+      "禁止: 事実の新規追加・推測・誇張・数値の創作、住戸特定（階数/向き/角住戸/帖・㎡/1LDK等）の再導入。",
+      "禁止: 価格/金額/円/万円・電話番号・外部URLの出力。",
+      `トーン:${tone}。以下のスタイルに準拠：\n${style}`,
+      `文字数:${min}〜${max}（全角）を厳守。`
+    ].join("\n");
+
+  const r = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.2,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: JSON.stringify({ text }) }
+    ]
+  });
+
+  try {
+    const obj = JSON.parse(r.choices?.[0]?.message?.content || "{}");
+    const polished = typeof obj?.polished === "string" ? obj.polished : text;
+    const notes = Array.isArray(obj?.notes) ? obj.notes.slice(0, 8) : [];
+    return { polished, notes };
+  } catch {
+    return { polished: text, notes: [] };
+  }
+}
+
 /* ---------- handler ---------- */
 export async function POST(req: Request) {
   try {
@@ -269,7 +304,7 @@ export async function POST(req: Request) {
       ? issues_structured_before.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`)
       : issuesTextFromModel;
 
-    // ⑦ 住戸特定があれば自動修正
+    // ⑦ 住戸特定があれば自動修正（棟向けに再書き＋スクラブ）
     let auto_fixed = false;
     if (scope === "building" && needsUnitFix(issues_structured_before)) {
       auto_fixed = true;
@@ -282,20 +317,58 @@ export async function POST(req: Request) {
       }
     }
 
-    // ⑧ 再チェック（After）
-    const issues_structured_after: CheckIssue[] = checkText(improved, { scope });
-    const issues_after: string[] = issues_structured_after.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`);
+    // ⑧ 再チェック（After：Polish前）
+    const issues_structured_after_check: CheckIssue[] = checkText(improved, { scope });
+    const issues_after: string[] = issues_structured_after_check.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`);
+
+    // ★ 中間テキスト（右の2枠目用）
+    const text_after_check = improved;
+
+    // ⑨ 仕上げ（Polish）：違反が出たら採用しない
+    let polish_applied = false;
+    let polish_notes: string[] = [];
+    let text_after_polish: string | null = null;
+
+    {
+      const { polished, notes } = await polishText(openai, improved, tone, STYLE_GUIDE, minChars, maxChars);
+      let candidate = stripPriceAndSpaces(polished);
+      candidate = scrubUnitSpecificRemainders(candidate);
+      candidate = enforceCadence(candidate, tone);
+      if (countJa(candidate) > maxChars) candidate = hardCapJa(candidate, maxChars);
+      if (countJa(candidate) < minChars) {
+        candidate = await ensureLengthReview({ openai, draft: candidate, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
+      }
+
+      const checkAfterPolish = checkText(candidate, { scope });
+      if (!checkAfterPolish.length) {
+        improved = candidate;
+        polish_applied = true;
+        polish_notes = notes;
+        text_after_polish = candidate; // 右の3枠目に表示
+      }
+    }
+
+    // ⑩ 最終チェック（念のため）
+    const issues_structured_final: CheckIssue[] = checkText(improved, { scope });
 
     // 互換：従来の `issues` は「Before」を返す（= 何がダメだったかが必ず見える）
     return new Response(JSON.stringify({
       ok: true,
-      improved,
-      issues: issues_before,
-      issues_before,
-      issues_after,
-      issues_structured_before,
-      issues_structured: issues_structured_after,  // After（現状違反が残っていればここに入る）
+      // テキスト
+      improved,                 // 最終版（= Polish採用時はPolish、未採用ならAfter-Check）
+      text_after_check,         // 右の2枠目
+      text_after_polish,        // 右の3枠目（未採用なら null）
+      // チェック結果
+      issues: issues_before,    // 互換（= Before）
+      issues_before,            // 改善前の指摘
+      issues_after,             // 自動修正後（Polish前）の指摘
+      issues_structured_before, // 構造化（Before）
+      issues_structured: issues_structured_final, // 構造化（最終）
+      // フラグ
       auto_fixed,
+      polish_applied,
+      polish_notes,
+      // サマリー
       summary: summary || (issuesTextFromModel.length ? issuesTextFromModel.join(" / ") : "")
     }), { status: 200, headers: { "content-type": "application/json" } });
 
