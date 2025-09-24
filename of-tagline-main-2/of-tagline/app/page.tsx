@@ -10,7 +10,7 @@ const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n
 const parseWords = (src: string) =>
   String(src || "").split(/[ ,、\s\n\/]+/).map((s) => s.trim()).filter(Boolean);
 
-/** LCSベースの差分（挿入/変更部分を <mark> 赤表示） */
+/** LCSベース差分（挿入/変更を <mark>） */
 function markDiffRed(original: string, improved: string) {
   const A = Array.from(original || "");
   const B = Array.from(improved || "");
@@ -22,11 +22,60 @@ function markDiffRed(original: string, improved: string) {
   let i = 0, j = 0;
   while (i < n && j < m) {
     if (A[i] === B[j]) { out.push(B[j]); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { i++; } // 削除は赤にしない
-    else { out.push(`<mark class="bg-red-50 text-red-600">${B[j++]}</mark>`); }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { i++; }
+    else { out.push(`<mark class="bg-orange-50 text-orange-700">${B[j++]}</mark>`); }
   }
-  while (j < m) out.push(`<mark class="bg-red-50 text-red-600">${B[j++]}</mark>`);
+  while (j < m) out.push(`<mark class="bg-orange-50 text-orange-700">${B[j++]}</mark>`);
   return out.join("");
+}
+
+/* ========= Tracker UI ========= */
+type StepState = "idle" | "active" | "done";
+type StepKey = "draft" | "check" | "polish";
+
+function StepDot({ state }: { state: StepState }) {
+  const base = "w-6 h-6 rounded-full flex items-center justify-center border";
+  if (state === "done") {
+    return <div className={cn(base, "bg-black border-black text-white")}>✓</div>;
+  }
+  if (state === "active") {
+    return <div className={cn(base, "bg-orange-500/90 border-orange-600 text-white animate-pulse")}>✓</div>;
+  }
+  return <div className={cn(base, "bg-neutral-200 border-neutral-300")} />;
+}
+
+function StepTrack({
+  steps
+}: {
+  steps: Array<{ key: StepKey; label: string; sub?: string; state: StepState }>;
+}) {
+  return (
+    <div className="bg-white rounded-2xl shadow p-4">
+      <div className="flex items-center gap-3">
+        {steps.map((s, idx) => (
+          <div key={s.key} className="flex items-center gap-3">
+            <div className="flex flex-col items-center">
+              <StepDot state={s.state} />
+              <div className="mt-1 text-[12px] leading-tight text-neutral-700 text-center">
+                <div>{s.label}</div>
+                {s.sub && <div className="text-neutral-500">{s.sub}</div>}
+              </div>
+            </div>
+            {idx < steps.length - 1 && (
+              <div
+                className={cn(
+                  "h-[2px] w-14 rounded",
+                  steps[idx].state === "done" || steps[idx + 1].state !== "idle"
+                    ? "bg-orange-400"
+                    : "bg-neutral-200"
+                )}
+              />
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 type CheckStatus = "idle" | "running" | "done" | "error";
@@ -39,7 +88,7 @@ export default function Page() {
   const [mustInput, setMustInput] = useState("");
   const mustWords = useMemo(() => parseWords(mustInput), [mustInput]);
 
-  // トーン（3パターン）
+  // トーン
   const tones = ["上品・落ち着いた", "一般的", "親しみやすい"] as const;
   type Tone = typeof tones[number];
   const [tone, setTone] = useState<Tone>("上品・落ち着いた");
@@ -48,20 +97,20 @@ export default function Page() {
   const [minChars, setMinChars] = useState(450);
   const [maxChars, setMaxChars] = useState(550);
 
-  // 状態
+  // 生成・通信状態
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 出力（ドラフト／安全チェック済／仕上げ提案）
+  // 出力①②③
   const [text1, setText1] = useState(""); // ドラフト
   const [text2, setText2] = useState(""); // 安全チェック済
-  const [text3, setText3] = useState(""); // 仕上げ提案
+  const [text3, setText3] = useState(""); // 仕上げ提案（採用時優先表示）
 
-  // 差分表示（①→②、②→③）
+  // 差分
   const [diff12Html, setDiff12Html] = useState("");
   const [diff23Html, setDiff23Html] = useState("");
 
-  // チェック結果（Beforeを表示）
+  // チェック結果（Before表示用）
   const [issues2, setIssues2] = useState<string[]>([]);
   const [summary2, setSummary2] = useState("");
 
@@ -72,6 +121,11 @@ export default function Page() {
 
   // 自動チェックのステータス
   const [checkStatus, setCheckStatus] = useState<CheckStatus>("idle");
+
+  // ===== Tracker の状態 =====
+  const [draftStep, setDraftStep] = useState<StepState>("idle");
+  const [checkStep, setCheckStep] = useState<StepState>("idle");
+  const [polishStep, setPolishStep] = useState<StepState>("idle");
 
   const validUrl = (s: string) => /^https?:\/\/\S+/i.test(String(s || "").trim());
   const currentText = text3 || text2 || text1;
@@ -88,6 +142,9 @@ export default function Page() {
     setPolishNotes([]); setAutoFixed(false); setPolishApplied(false);
     setCheckStatus("idle");
 
+    // tracker リセット
+    setDraftStep("idle"); setCheckStep("idle"); setPolishStep("idle");
+
     try {
       if (!name.trim()) throw new Error("物件名を入力してください。");
       if (!validUrl(url)) throw new Error("正しい物件URLを入力してください。");
@@ -95,7 +152,10 @@ export default function Page() {
 
       setBusy(true);
 
-      // ① ドラフト（/api/describe は初回文だけ返す）
+      // Draft: start
+      setDraftStep("active");
+
+      // ① 初回生成
       const res = await fetch("/api/describe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -106,11 +166,15 @@ export default function Page() {
       const generated = String(j?.text || "");
       setText1(generated);
 
+      // Draft: done
+      setDraftStep("done");
+
       // ②（→③まで）自動チェック
       await handleCheck(generated, /*suppressBusy*/ true);
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
       setCheckStatus("error");
+      setDraftStep((s) => (s === "active" ? "idle" : s));
     } finally {
       setBusy(false);
     }
@@ -120,8 +184,12 @@ export default function Page() {
   async function handleCheck(baseText?: string, suppressBusy = false) {
     try {
       const src = (baseText ?? text1).trim();
-      if (!src) throw new Error("まずドラフトを生成してください。");
+      if (!src) throw new Error("まず①の文章を生成してください。");
       if (!suppressBusy) setBusy(true);
+
+      // Check: start
+      setCheckStep("active");
+      setPolishStep("idle");
 
       setCheckStatus("running");
       setIssues2([]); setSummary2(""); setDiff12Html(""); setDiff23Html("");
@@ -140,37 +208,44 @@ export default function Page() {
       const j = await res.json();
       if (!res.ok) throw new Error(j?.error || "チェックに失敗しました。");
 
-      // サーバーの新キーを最優先で利用（互換キーはフォールバック）
-      const draft       = String(j?.draft ?? src);
-      const afterCheck  = String(j?.clean ?? j?.text_after_check ?? j?.improved ?? src);
-      const afterPolish = typeof j?.refined === "string" ? j.refined
-                          : (typeof j?.text_after_polish === "string" ? j.text_after_polish : "");
-
-      // 画面の3段に反映
-      setText1(draft);
+      // ② 安全チェック済
+      const afterCheck = String(j?.text_after_check ?? j?.improved ?? src);
       setText2(afterCheck);
-      setText3(afterPolish);
 
-      // 差分
-      setDiff12Html(markDiffRed(draft, afterCheck));
-      setDiff23Html(afterPolish ? markDiffRed(afterCheck, afterPolish) : "");
-
-      // 指摘・サマリ
       const issuesBefore = Array.isArray(j?.issues_before) ? j.issues_before
                         : Array.isArray(j?.issues) ? j.issues : [];
       const summary = j?.summary || (issuesBefore.length ? issuesBefore.join(" / ") : "");
       setIssues2(issuesBefore);
       setSummary2(summary);
 
+      // Check: done
+      setCheckStep("done");
+
+      // Polish: start
+      setPolishStep("active");
+
+      // ③ 仕上げ（採用時のみ反映）
+      const afterPolish = typeof j?.text_after_polish === "string" ? j.text_after_polish : "";
+      setText3(afterPolish);
+
+      // 差分
+      setDiff12Html(markDiffRed(src, afterCheck));
+      setDiff23Html(afterPolish ? markDiffRed(afterCheck, afterPolish) : "");
+
       // フラグとメモ
       setAutoFixed(Boolean(j?.auto_fixed));
       setPolishApplied(Boolean(j?.polish_applied));
       setPolishNotes(Array.isArray(j?.polish_notes) ? j.polish_notes : []);
 
+      // Polish: done/idle
+      setPolishStep(Boolean(j?.polish_applied) ? "done" : "idle");
+
       setCheckStatus("done");
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
       setCheckStatus("error");
+      setCheckStep((s) => (s === "active" ? "idle" : s));
+      setPolishStep("idle");
     } finally {
       if (!suppressBusy) setBusy(false);
     }
@@ -186,11 +261,11 @@ export default function Page() {
     setPolishNotes([]); setPolishApplied(false); setAutoFixed(false);
     setError(null);
     setCheckStatus("idle");
+    setDraftStep("idle"); setCheckStep("idle"); setPolishStep("idle");
   }
 
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch {} };
 
-  /* ステータス表示の見た目 */
   const statusLabel =
     checkStatus === "running" ? "実行中…" :
     checkStatus === "done"    ? "完了" :
@@ -199,6 +274,13 @@ export default function Page() {
     checkStatus === "running" ? "bg-yellow-100 text-yellow-700" :
     checkStatus === "done"    ? "bg-emerald-100 text-emerald-700" :
     checkStatus === "error"   ? "bg-red-100 text-red-700" : "bg-neutral-100 text-neutral-600";
+
+  /* Tracker の表示内容 */
+  const stepsForTracker = [
+    { key: "draft"  as StepKey, label: "ドラフト",      sub: draftStep === "active" ? "作成中" : draftStep === "done" ? "完了" : "", state: draftStep },
+    { key: "check"  as StepKey, label: "安全チェック",  sub: checkStep === "active" ? "実行中" : checkStep === "done" ? "完了" : "", state: checkStep },
+    { key: "polish" as StepKey, label: "仕上げ提案",    sub: polishStep === "active" ? "生成中" : polishStep === "done" ? "完了" : "", state: polishStep },
+  ];
 
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
@@ -356,12 +438,15 @@ export default function Page() {
           </section>
         </form>
 
-        {/* 右カラム：3つの出力 */}
+        {/* 右カラム：トラッカー＋3出力 */}
         <section className="space-y-4">
+          {/* 進捗トラッカー */}
+          <StepTrack steps={stepsForTracker} />
+
           {/* 出力① ドラフト */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between">
-              <div className="text-sm font-medium">ドラフト</div>
+              <div className="text-sm font-medium">出力① ドラフト</div>
               <div className="flex items-center gap-3">
                 <div className="text-xs text-neutral-500">長さ：{jaLen(text1)} 文字</div>
                 <Button onClick={() => copy(text1)} disabled={!text1}>コピー</Button>
@@ -380,7 +465,7 @@ export default function Page() {
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between">
               <div className="text-sm font-medium flex items-center gap-2">
-                安全チェック済
+                出力② 安全チェック済
                 {autoFixed ? (
                   <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">自動修正適用</span>
                 ) : (
@@ -411,11 +496,11 @@ export default function Page() {
             </div>
           </div>
 
-          {/* 出力③ 仕上げ提案 */}
+          {/* 出力③ 仕上げ提案（Polish） */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between">
               <div className="text-sm font-medium flex items-center gap-2">
-                仕上げ提案
+                出力③ 仕上げ提案（Polish）
                 {polishApplied ? (
                   <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">適用</span>
                 ) : (
@@ -445,9 +530,8 @@ export default function Page() {
 
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
-              ※ <code>/api/describe</code> がドラフト（①）を生成。<code>/api/review</code> は<br/>
-              ②「安全チェック済」は <code>clean</code>（互換: <code>text_after_check</code>）、<br/>
-              ③「仕上げ提案」は <code>refined</code>（互換: <code>text_after_polish</code>）を返します。
+              ※ ①ドラフトは <code>/api/describe</code>、②③は <code>/api/review</code> を利用します。<br/>
+              トラッカーは各リクエストと連動して自動更新されます。
             </div>
           </div>
         </section>
