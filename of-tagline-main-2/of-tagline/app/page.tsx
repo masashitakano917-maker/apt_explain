@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
 
 /* ========= helpers ========= */
@@ -34,7 +34,7 @@ type StepState = "idle" | "active" | "done";
 type StepKey = "draft" | "check" | "polish";
 
 function StepDot({ state }: { state: StepState }) {
-  const base = "w-6 h-6 rounded-full flex items-center justify-center border";
+  const base = "w-6 h-6 rounded-full flex items-center justify-center border select-none";
   if (state === "done") {
     return <div className={cn(base, "bg-black border-black text-white")}>✓</div>;
   }
@@ -45,34 +45,47 @@ function StepDot({ state }: { state: StepState }) {
 }
 
 function StepTrack({
-  steps
+  steps,
+  onStepClick,
 }: {
   steps: Array<{ key: StepKey; label: string; sub?: string; state: StepState }>;
+  onStepClick?: (key: StepKey) => void;
 }) {
   return (
     <div className="bg-white rounded-2xl shadow p-4">
       <div className="flex items-center gap-3">
-        {steps.map((s, idx) => (
-          <div key={s.key} className="flex items-center gap-3">
-            <div className="flex flex-col items-center">
-              <StepDot state={s.state} />
-              <div className="mt-1 text-[12px] leading-tight text-neutral-700 text-center">
-                <div>{s.label}</div>
-                {s.sub && <div className="text-neutral-500">{s.sub}</div>}
-              </div>
-            </div>
-            {idx < steps.length - 1 && (
-              <div
+        {steps.map((s, idx) => {
+          const clickable = s.state !== "idle";
+          return (
+            <div key={s.key} className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => clickable && onStepClick?.(s.key)}
                 className={cn(
-                  "h-[2px] w-14 rounded",
-                  steps[idx].state === "done" || steps[idx + 1].state !== "idle"
-                    ? "bg-orange-400"
-                    : "bg-neutral-200"
+                  "flex flex-col items-center focus:outline-none",
+                  clickable ? "cursor-pointer" : "cursor-default"
                 )}
-              />
-            )}
-          </div>
-        ))}
+                aria-label={`${s.label}へスクロール`}
+              >
+                <StepDot state={s.state} />
+                <div className="mt-1 text-[12px] leading-tight text-neutral-700 text-center">
+                  <div className="font-medium">{s.label}</div>
+                  {s.sub && <div className="text-neutral-500">{s.sub}</div>}
+                </div>
+              </button>
+              {idx < steps.length - 1 && (
+                <div
+                  className={cn(
+                    "h-[2px] w-14 rounded",
+                    steps[idx].state === "done" || steps[idx + 1].state !== "idle"
+                      ? "bg-orange-400"
+                      : "bg-neutral-200"
+                  )}
+                />
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -127,6 +140,21 @@ export default function Page() {
   const [checkStep, setCheckStep] = useState<StepState>("idle");
   const [polishStep, setPolishStep] = useState<StepState>("idle");
 
+  // ====== 自動スクロールのための参照 ======
+  const draftRef = useRef<HTMLDivElement | null>(null);
+  const checkRef = useRef<HTMLDivElement | null>(null);
+  const polishRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollTo = (key: StepKey) => {
+    const map: Record<StepKey, HTMLDivElement | null> = {
+      draft: draftRef.current,
+      check: checkRef.current,
+      polish: polishRef.current,
+    } as any;
+    const el = map[key];
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   const validUrl = (s: string) => /^https?:\/\/\S+/i.test(String(s || "").trim());
   const currentText = text3 || text2 || text1;
 
@@ -168,6 +196,8 @@ export default function Page() {
 
       // Draft: done
       setDraftStep("done");
+      // ドラフトのカードへスクロール
+      setTimeout(() => scrollTo("draft"), 0);
 
       // ②（→③まで）自動チェック
       await handleCheck(generated, /*suppressBusy*/ true);
@@ -184,7 +214,7 @@ export default function Page() {
   async function handleCheck(baseText?: string, suppressBusy = false) {
     try {
       const src = (baseText ?? text1).trim();
-      if (!src) throw new Error("まず①の文章を生成してください。");
+      if (!src) throw new Error("まずドラフトを生成してください。");
       if (!suppressBusy) setBusy(true);
 
       // Check: start
@@ -218,8 +248,9 @@ export default function Page() {
       setIssues2(issuesBefore);
       setSummary2(summary);
 
-      // Check: done
+      // Check: done & スクロール
       setCheckStep("done");
+      setTimeout(() => scrollTo("check"), 0);
 
       // Polish: start
       setPolishStep("active");
@@ -237,8 +268,10 @@ export default function Page() {
       setPolishApplied(Boolean(j?.polish_applied));
       setPolishNotes(Array.isArray(j?.polish_notes) ? j.polish_notes : []);
 
-      // Polish: done/idle
-      setPolishStep(Boolean(j?.polish_applied) ? "done" : "idle");
+      // Polish: done/idle & スクロール
+      const applied = Boolean(j?.polish_applied);
+      setPolishStep(applied ? "done" : "idle");
+      if (applied) setTimeout(() => scrollTo("polish"), 0);
 
       setCheckStatus("done");
     } catch (err: any) {
@@ -262,6 +295,8 @@ export default function Page() {
     setError(null);
     setCheckStatus("idle");
     setDraftStep("idle"); setCheckStep("idle"); setPolishStep("idle");
+    // 先頭へ
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch {} };
@@ -417,7 +452,7 @@ export default function Page() {
               <div className="space-y-3">
                 {!!diff12Html && (
                   <details open className="rounded border">
-                    <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分 ①→②（ドラフト → 安全チェック済）</summary>
+                    <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分（ドラフト → 安全チェック済）</summary>
                     <div
                       className="p-3 text-sm leading-relaxed"
                       dangerouslySetInnerHTML={{ __html: diff12Html }}
@@ -426,7 +461,7 @@ export default function Page() {
                 )}
                 {!!diff23Html && (
                   <details className="rounded border">
-                    <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分 ②→③（安全チェック済 → 仕上げ提案）</summary>
+                    <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分（安全チェック済 → 仕上げ提案）</summary>
                     <div
                       className="p-3 text-sm leading-relaxed"
                       dangerouslySetInnerHTML={{ __html: diff23Html }}
@@ -440,13 +475,13 @@ export default function Page() {
 
         {/* 右カラム：トラッカー＋3出力 */}
         <section className="space-y-4">
-          {/* 進捗トラッカー */}
-          <StepTrack steps={stepsForTracker} />
+          {/* 進捗トラッカー（クリックでスクロール） */}
+          <StepTrack steps={stepsForTracker} onStepClick={scrollTo} />
 
-          {/* 出力① ドラフト */}
-          <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
+          {/* ドラフト */}
+          <div ref={draftRef} className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden scroll-mt-24">
             <div className="p-4 border-b flex items-center justify-between">
-              <div className="text-sm font-medium">出力① ドラフト</div>
+              <div className="text-sm font-medium">ドラフト</div>
               <div className="flex items-center gap-3">
                 <div className="text-xs text-neutral-500">長さ：{jaLen(text1)} 文字</div>
                 <Button onClick={() => copy(text1)} disabled={!text1}>コピー</Button>
@@ -461,11 +496,11 @@ export default function Page() {
             </div>
           </div>
 
-          {/* 出力② 安全チェック済 */}
-          <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
+          {/* 安全チェック済 */}
+          <div ref={checkRef} className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden scroll-mt-24">
             <div className="p-4 border-b flex items-center justify-between">
               <div className="text-sm font-medium flex items-center gap-2">
-                出力② 安全チェック済
+                安全チェック済
                 {autoFixed ? (
                   <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">自動修正適用</span>
                 ) : (
@@ -496,11 +531,11 @@ export default function Page() {
             </div>
           </div>
 
-          {/* 出力③ 仕上げ提案（Polish） */}
-          <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
+          {/* 仕上げ提案（Polish） */}
+          <div ref={polishRef} className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden scroll-mt-24">
             <div className="p-4 border-b flex items-center justify-between">
               <div className="text-sm font-medium flex items-center gap-2">
-                出力③ 仕上げ提案（Polish）
+                仕上げ提案（Polish）
                 {polishApplied ? (
                   <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">適用</span>
                 ) : (
@@ -523,15 +558,15 @@ export default function Page() {
                   )}
                 </>
               ) : (
-                <div className="text-neutral-500 text-sm">— 仕上げは②が完成後に表示 —</div>
+                <div className="text-neutral-500 text-sm">— 仕上げは安全チェックの完了後に表示 —</div>
               )}
             </div>
           </div>
 
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
-              ※ ①ドラフトは <code>/api/describe</code>、②③は <code>/api/review</code> を利用します。<br/>
-              トラッカーは各リクエストと連動して自動更新されます。
+              ※ ドラフトは <code>/api/describe</code>、安全チェック/仕上げは <code>/api/review</code> を利用。<br/>
+              トラッカーは各リクエストと連動して自動更新・スクロールします。
             </div>
           </div>
         </section>
