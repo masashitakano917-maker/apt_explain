@@ -20,7 +20,8 @@ function hardCapJa(s: string, max: number): string {
 }
 
 const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const splitSentencesJa = (t: string) => (t || "").replace(/\s+\n/g, "\n").trim().split(/(?<=[。！？\?])\s*(?=[^\s])/g).map(s=>s.trim()).filter(Boolean);
+const splitSentencesJa = (t: string) =>
+  (t || "").replace(/\s+\n/g, "\n").trim().split(/(?<=[。！？\?])\s*(?=[^\s])/g).map(s=>s.trim()).filter(Boolean);
 
 const normMustWords = (src: unknown): string[] => {
   const s: string = Array.isArray(src) ? (src as unknown[]).map(String).join(" ") : String(src ?? "");
@@ -134,6 +135,31 @@ function smoothenFlow(text: string): string {
     t = ss.join("");
   }
   return cleanFragments(t);
+}
+
+/* ===== 句読点の強制補正（ダブり/抜け/不自然な位置） ===== */
+function normalizePunctuationStrong(text: string): string {
+  let t = text || "";
+
+  // 「、、」「、。」などの連続・逆順
+  t = t.replace(/、{2,}/g, "、")
+       .replace(/。\s*、/g, "。")
+       .replace(/、\s*。/g, "。");
+
+  // 助詞直後の不要な読点（建物は、/共用は、 など）
+  t = t.replace(/(建物|共用|管理体制|交通アクセス|周辺|この?物件|本物件)(には|では)?、/g, "$1$2");
+  t = t.replace(/([^\s。、！？])は、(?=[^\s、。])/g, "$1は");
+
+  // 定型補正
+  t = t.replace(/共用は、?部分/g, "共用部分");
+  t = t.replace(/周辺には、/g, "周辺には");
+
+  // 「…ます管理/…です交通」→ 句点補完（保険）
+  t = t.replace(/(ます|です)(管理|交通|共用|周辺|建物|体制)/g, "$1。$2");
+
+  // 末尾に句点
+  if (!/[。！？]$/.test(t)) t += "。";
+  return t;
 }
 
 /* ============================== 住戸系の完全除外（文ごと） ============================== */
@@ -286,6 +312,7 @@ async function ensureLengthSafe(opts: {
       const t = String(JSON.parse(r.choices?.[0]?.message?.content || "{}")?.text || out);
       out = stripPriceAndSpaces(enforceApproxForWalk(dropUnitSentencesCompletely(t)));
       out = smoothenFlow(out);
+      out = normalizePunctuationStrong(out);
     } catch {}
     if (countJa(out) > opts.max) out = hardCapJa(out, opts.max);
   }
@@ -317,6 +344,7 @@ async function polishLite(openai: OpenAI, text: string, tone: string, style: str
     // 仕上げ後も安全側で後処理
     t = stripPriceAndSpaces(enforceApproxForWalk(dropUnitSentencesCompletely(t)));
     t = smoothenFlow(t);
+    t = normalizePunctuationStrong(t);
     if (countJa(t) > max) t = hardCapJa(t, max);
     if (countJa(t) < min) t = await ensureLengthSafe({ openai, draft: t, min, max, tone, style });
     return t;
@@ -366,6 +394,8 @@ export async function POST(req: Request) {
     composed = enforceApproxForWalk(composed);
     composed = stripRenovationClaimsFromText(composed);
     composed = smoothenFlow(composed);
+    composed = cleanFragments(composed);
+    composed = normalizePunctuationStrong(composed);   // ★ 追加
 
     // 文字数調整（安全文のみで増減）
     composed = await ensureLengthSafe({ openai, draft: composed, min: minChars, max: maxChars, tone, style: STYLE });
@@ -377,6 +407,8 @@ export async function POST(req: Request) {
       composed = enforceApproxForWalk(composed);
       composed = dropUnitSentencesCompletely(composed); // 念のため
       composed = smoothenFlow(composed);
+      composed = cleanFragments(composed);
+      composed = normalizePunctuationStrong(composed);
       composed = stripPriceAndSpaces(composed);
       if (countJa(composed) < minChars) {
         composed = await ensureLengthSafe({ openai, draft: composed, min: minChars, max: maxChars, tone, style: STYLE });
@@ -389,6 +421,7 @@ export async function POST(req: Request) {
 
     /* --- 4) 仕上げ提案（装飾のみ）→ ゲート判定で採用可否 --- */
     let refined_candidate = await polishLite(openai, text_after_check, tone, STYLE, minChars, maxChars);
+    refined_candidate = normalizePunctuationStrong(refined_candidate); // ★ 追加
     const issues_after_polish = checkText(refined_candidate, { scope: "building" });
     const pen_base = fluencyPenalty(text_after_check);
     const pen_ref = fluencyPenalty(refined_candidate);
@@ -415,7 +448,7 @@ export async function POST(req: Request) {
       // 最終採用
       improved,
 
-      // 3段表示
+      // 3段表示（フロントの「ドラフト/安全チェック済/仕上げ提案」に対応）
       draft: String(text || ""),     // ドラフト（元入力）
       clean: text_after_check,       // 安全チェック済
       refined: text_after_polish,    // 仕上げ提案（採用時のみ文字列／不採用なら null）
@@ -425,7 +458,7 @@ export async function POST(req: Request) {
       text_after_polish,
 
       // NG理由（左ペイン表示用）
-      issues: issues_from_draft, // ★ 追加：ドラフトに対する「何が・なぜダメか」
+      issues: issues_from_draft, // ドラフトに対する「何が・なぜダメか」
       issues_before: issues_structured_before.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`),
 
       // After/最終
@@ -436,7 +469,7 @@ export async function POST(req: Request) {
       // メタ
       auto_fixed: true,
       polish_applied,
-      polish_notes: polish_applied ? ["語尾・接続の整形を適用"] : [],
+      polish_notes: polish_applied ? ["語尾・接続・句読点の整形を適用"] : [],
       summary: issues_from_draft.slice(0, 5).join(" / ")
     }), { status: 200, headers: { "content-type": "application/json" } });
 
