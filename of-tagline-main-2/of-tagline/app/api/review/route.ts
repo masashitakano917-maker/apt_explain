@@ -41,7 +41,7 @@ const RENOVATION_PATTERNS: RegExp[] = [
   /フルリノベ/g,
   /改(装|修)工事/g,
   /リモデル/g,
-  /リニューアル/g, // 文脈依存だが住戸/建物の改修示唆になりやすいので抑止
+  /リニューアル/g,
 ];
 
 function stripRenovationClaimsFromText(text: string): string {
@@ -84,7 +84,7 @@ function styleGuide(tone: string): string {
   ].join("\n");
 }
 
-/* ---------- cadence helpers (語尾リズム調整) ---------- */
+/* ---------- cadence helpers（安全版に置換済み） ---------- */
 type CadenceTarget = { minPolite: number; maxPolite: number; aimPolite: number };
 function cadenceTargetByTone(tone: string): CadenceTarget {
   if (tone === "上品・落ち着いた") return { minPolite: 0.40, maxPolite: 0.60, aimPolite: 0.50 };
@@ -94,48 +94,94 @@ function cadenceTargetByTone(tone: string): CadenceTarget {
 const JA_SENT_SPLIT = /(?<=[。！？\?])\s*(?=[^\s])/g;
 const splitSentencesJa = (t: string) => (t || "").replace(/\s+\n/g, "\n").trim().split(JA_SENT_SPLIT).map(s=>s.trim()).filter(Boolean);
 const isPoliteEnding = (s: string) => /(です|ます)(?:。|$)/.test(s);
+
+// —— ここから文体安定版 —— //
 const nounStopVariant = (s: string) => {
-  let out = s;
-  out = out.replace(/はあります。$/, "を備える。")
-           .replace(/があります。$/, "を備える。")
-           .replace(/を設置しています。$/, "を設置。")
-           .replace(/を採用しています。$/, "を採用。")
-           .replace(/を備えています。$/, "を備える。")
-           .replace(/に位置しています。$/, "に位置。")
-           .replace(/に配慮しています。$/, "に配慮。")
-           .replace(/です。$/, "。")
-           .replace(/(て|で)います。$/, "$1いる。");
-  if (!/[。！？]$/.test(out)) out += "。";
-  return out;
+  // 敬体は保持しつつ、準体で単調さを和らげる
+  return s
+    .replace(/はあります。$/, "を備えています。")
+    .replace(/があります。$/, "を備えています。")
+    .replace(/を設置しています。$/, "を設置しています。")
+    .replace(/を採用しています。$/, "を採用した意匠です。")
+    .replace(/を備えています。$/, "を備えた設えです。")
+    .replace(/に位置しています。$/, "に位置します。")
+    .replace(/に配慮しています。$/, "に配慮した計画です。");
 };
-const toPlainEnding = (s: string) =>
-  s.replace(/を備えています。$/, "を備える。")
-   .replace(/を採用しています。$/, "を採用する。")
-   .replace(/が整っています。$/, "が整う。")
-   .replace(/に配慮しています。$/, "に配慮する。");
+
+const toPlainEnding = (s: string) => {
+  // 常体にはせず、敬体のまま軽く変化
+  return s
+    .replace(/を備えています。$/, "の体制です。")
+    .replace(/が整っています。$/, "が整う環境です。")
+    .replace(/に配慮しています。$/, "に配慮した設計です。");
+};
 
 function enforceCadence(text: string, tone: string): string {
   const T = cadenceTargetByTone(tone);
   const ss = splitSentencesJa(text);
   if (!ss.length) return text;
-  for (let i=0;i+2<ss.length;i++){
-    if (isPoliteEnding(ss[i]) && isPoliteEnding(ss[i+1]) && isPoliteEnding(ss[i+2])) ss[i+1]=nounStopVariant(ss[i+1]);
+
+  // 連続3敬体の中央だけを軽くパラフレーズ（最大2回まで）
+  let tweaks = 0;
+  for (let i = 0; i + 2 < ss.length; i++) {
+    if (tweaks >= 2) break;
+    const a = ss[i], b = ss[i + 1], c = ss[i + 2];
+    if (isPoliteEnding(a) && isPoliteEnding(b) && isPoliteEnding(c)) {
+      if (/(アクセス|徒歩|分|路線|駅|バス|立地)/.test(b)) continue; // アクセス文は崩さない
+      ss[i + 1] = nounStopVariant(b);
+      tweaks++;
+    }
   }
+
+  // 敬体比率の微調整（敬体のまま言い換え）最大2回
   const ratioPolite = ss.filter(isPoliteEnding).length / ss.length;
   if (ratioPolite > T.maxPolite) {
-    for (let i=0; i<ss.length && (ss.filter(isPoliteEnding).length/ss.length)>T.aimPolite; i++) {
-      if (isPoliteEnding(ss[i])) ss[i] = (i%2===0) ? nounStopVariant(ss[i]) : toPlainEnding(ss[i]);
-    }
-  } else if (ratioPolite < T.minPolite) {
-    for (let i=0; i<ss.length && (ss.filter(isPoliteEnding).length/ss.length)<T.aimPolite; i++) {
-      if (!isPoliteEnding(ss[i])) ss[i] = ss[i].replace(/。$/, "です。");
+    let changed = 0;
+    for (let i = 0; i < ss.length && changed < 2; i++) {
+      if (isPoliteEnding(ss[i])) {
+        if (ss[i].length < 20 || /(アクセス|徒歩|分|路線|駅|バス)/.test(ss[i])) continue;
+        ss[i] = nounStopVariant(ss[i]);
+        changed++;
+      }
     }
   }
-  for (let i=1;i<ss.length;i++){
-    ss[i]=ss[i].replace(/^(また|さらに|なお|そして)、/g,"$1、");
-    if (i>=2 && /^また/.test(ss[i]) && /^また/.test(ss[i-1])) ss[i]=ss[i].replace(/^また、?/,"");
+
+  // 接続詞の整理（連続「また、」を抑制）
+  for (let i = 1; i < ss.length; i++) {
+    ss[i] = ss[i].replace(/^(また|さらに|なお|そして)、/g, "$1、");
+    if (i >= 2 && /^また/.test(ss[i]) && /^また/.test(ss[i - 1])) {
+      ss[i] = ss[i].replace(/^また、?/, "");
+    }
   }
   return ss.join("");
+}
+
+/* ---------- phrase throttle（安全版に置換済み） ---------- */
+function throttlePhrases(text: string): string {
+  // 同義反復の抑制（各表現は段落ごとに最大1回、置換は控えめ）
+  const buckets: Array<{ re: RegExp; repls: string[]; maxKeep: number }> = [
+    { re: /整って(?:い)?ます?/g, repls: ["備わっています", "体制が整えられています"], maxKeep: 1 },
+    { re: /提供(?:し|して)います?/g, repls: ["設けています", "用意しています"], maxKeep: 1 },
+    { re: /採用(?:し|して)います?/g, repls: ["取り入れています"], maxKeep: 1 },
+    // 「実現→かなえる」は不自然化が多いので廃止
+  ];
+
+  return text
+    .split(/\n{2,}/)
+    .map(par => {
+      let out = par;
+      for (const b of buckets) {
+        let count = 0;
+        out = out.replace(b.re, (m) => {
+          count++;
+          if (count <= b.maxKeep) return m;
+          const alt = b.repls[(count - 1) % b.repls.length];
+          return alt;
+        });
+      }
+      return out;
+    })
+    .join("\n\n");
 }
 
 /* ---------- unit fix helpers ---------- */
@@ -217,36 +263,6 @@ async function rewriteForCompliance(openai: OpenAI, text: string, tone: string, 
   });
   try { return String(JSON.parse(r.choices?.[0]?.message?.content || "{}")?.rewritten || text); }
   catch { return text; }
-}
-
-/* ---------- phrase throttle & subject fix ---------- */
-function throttlePhrases(text: string): string {
-  const buckets: Array<{ lex: RegExp; repls: string[]; maxKeep: number }> = [
-    { lex: /整って(?:い)?ます?/g, repls: ["備わっています", "用意されています", "整備されています", "あります"], maxKeep: 1 },
-    { lex: /整い/g,               repls: ["備え", "体制があり", "環境があり"], maxKeep: 1 },
-    { lex: /提供(?:し|して)います?/g, repls: ["設けています", "用意しています", "行っています"], maxKeep: 1 },
-    { lex: /採用(?:し|して)います?/g, repls: ["用いています", "取り入れています"], maxKeep: 1 },
-    { lex: /実現(?:し|して)います?/g, repls: ["かなえています", "形にしています"], maxKeep: 0 },
-  ];
-  let out = text;
-  for (const b of buckets) {
-    let m: RegExpExecArray | null;
-    const idxs: number[] = [];
-    const re = new RegExp(b.lex.source, "g");
-    while ((m = re.exec(out))) idxs.push(m.index);
-    if (idxs.length <= b.maxKeep) continue;
-    let used = 0, ri = 0;
-    out = out.replace(b.lex, (w) => (++used <= b.maxKeep) ? w : (b.repls[ri++ % b.repls.length]));
-  }
-  return out;
-}
-
-function deTautologyAndSubjectFix(text: string): string {
-  return text
-    .replace(/敷地は鉄筋コンクリート造/g, "建物は鉄筋コンクリート造")
-    .replace(/総戸数は(\d+)戸を誇ります/g, "総戸数は$1戸です")
-    .replace(/理想的/g, "快適")
-    .replace(/\s{2,}/g, " ");
 }
 
 /* ---------- 壊れた語尾の応急修正 ---------- */
@@ -392,9 +408,8 @@ export async function POST(req: Request) {
     improved = stripPriceAndSpaces(improved);
     improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE, request });
 
-    // ④ 文字数最終 & ⑤ リズム＋言い換え
+    // ④ 文字数最終 & ⑤ リズム＋言い換え（安全版）
     if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
-    improved = deTautologyAndSubjectFix(improved);
     improved = throttlePhrases(improved);
     improved = enforceCadence(improved, tone);
     improved = fixTruncatedEndings(improved);
@@ -420,7 +435,6 @@ export async function POST(req: Request) {
       auto_fixed = true;
       improved = await rewriteForBuilding(openai, improved, tone, STYLE_GUIDE, minChars, maxChars, issues_structured_before);
       improved = scrubUnitSpecificRemainders(improved);
-      improved = deTautologyAndSubjectFix(improved);
       improved = throttlePhrases(improved);
       improved = enforceCadence(improved, tone);
       improved = fixTruncatedEndings(improved);
@@ -442,7 +456,6 @@ export async function POST(req: Request) {
       // さらにモデルで自然な文へ接続・中立化
       improved = await rewriteForCompliance(openai, improved, tone, STYLE_GUIDE, minChars, maxChars, issues_after_unit);
       improved = stripPriceAndSpaces(improved);
-      improved = deTautologyAndSubjectFix(improved);
       improved = throttlePhrases(improved);
       improved = enforceCadence(improved, tone);
       improved = fixTruncatedEndings(improved);
@@ -471,7 +484,6 @@ export async function POST(req: Request) {
       let candidate = stripPriceAndSpaces(polished);
       candidate = scrubUnitSpecificRemainders(candidate);
       candidate = scrubGenericByIssues(candidate, checkText(candidate, { scope })); // 念のため
-      candidate = deTautologyAndSubjectFix(candidate);
       candidate = throttlePhrases(candidate);
       candidate = enforceCadence(candidate, tone);
       candidate = fixTruncatedEndings(candidate);
