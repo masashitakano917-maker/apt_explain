@@ -31,6 +31,33 @@ const stripPriceAndSpaces = (s: string) =>
     .replace(/\s{2,}/g, " ")
     .trim();
 
+/* ---------- renovation blockers (改修表現の抑止・最小パッチ追加) ---------- */
+const RENOVATION_PATTERNS: RegExp[] = [
+  /リフォーム(済|済み)?/g,
+  /リノベ(ーション)?(済|済み)?/g,
+  /内装(を)?一新/g,
+  /(全|全面)改(装|修)/g,
+  /スケルトン(・)?リノベ/g,
+  /フルリノベ/g,
+  /改(装|修)工事/g,
+  /リモデル/g,
+  /リニューアル/g, // 文脈依存だが住戸/建物の改修示唆になりやすいので抑止
+];
+
+function stripRenovationClaimsFromText(text: string): string {
+  let out = text || "";
+  for (const re of RENOVATION_PATTERNS) out = out.replace(re, "");
+  // 句読点・助詞の後始末（軽め）
+  out = out
+    .replace(/(、|。){2,}/g, "。")
+    .replace(/(は|が|も|を|に|で|と|から|まで|より)(、|。)/g, "。")
+    .replace(/[ 　]+/g, " ")
+    .replace(/(。)\s*(。)+/g, "。")
+    .trim()
+    .replace(/、$/, "。");
+  return out;
+}
+
 /* ---------- STYLE PRESETS ---------- */
 function styleGuide(tone: string): string {
   if (tone === "親しみやすい") {
@@ -183,7 +210,7 @@ async function rewriteForCompliance(openai: OpenAI, text: string, tone: string, 
           'Return ONLY {"rewritten": string}. (json)\n' +
           "役割: 不動産広告の校正者。禁止用語/不当表示（優良・有利誤認/過度な強調/二重価格）や商標名を削除/中立化し、文として自然に繋ぐ。\n" +
           `トーン:${tone}\nスタイル:\n${style}\n` +
-          `文字数:${min}〜${max}（全角）。事実の新規追加/誇張は禁止。価格/金額/電話番号/外部URLを出力しない。\n` +
+          `文字数:${min}〜${max}（全角）。事実の新規追加/誇張は禁止。価格/金額/電話番号/URLを出力しない。\n` +
           `削除・中立化の対象語句例:\n- ${targets.join(" / ")}` },
       { role: "user", content: JSON.stringify({ text }) }
     ]
@@ -373,6 +400,12 @@ export async function POST(req: Request) {
     improved = fixTruncatedEndings(improved);
     if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
 
+    // ★ 最小パッチ：⑤直後に「改修語の抑止」＋「下限救済」を追加
+    improved = stripRenovationClaimsFromText(improved);
+    if (countJa(improved) < minChars) {
+      improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE, request });
+    }
+
     // ⑥ チェック（Before：表示用）
     const issues_structured_before: CheckIssue[] = checkText(improved, { scope });
     const issues_before: string[] = issues_structured_before.length
@@ -395,6 +428,8 @@ export async function POST(req: Request) {
       if (countJa(improved) < minChars) {
         improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
       }
+      // ★ 住戸一般化後の末尾にも改修語の抑止を追加
+      improved = stripRenovationClaimsFromText(improved);
     }
 
     // b) 一般の禁止/不当/商標（例：「人気の」「新築同様」「ディズニーランド」等）
@@ -415,6 +450,8 @@ export async function POST(req: Request) {
       if (countJa(improved) < minChars) {
         improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
       }
+      // ★ 一般違反修正後の末尾にも改修語の抑止を追加
+      improved = stripRenovationClaimsFromText(improved);
     }
 
     // ⑧ 再チェック（After：Polish前）
@@ -439,6 +476,11 @@ export async function POST(req: Request) {
       candidate = enforceCadence(candidate, tone);
       candidate = fixTruncatedEndings(candidate);
       if (countJa(candidate) > maxChars) candidate = hardCapJa(candidate, maxChars);
+      if (countJa(candidate) < minChars) {
+        candidate = await ensureLengthReview({ openai, draft: candidate, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
+      }
+      // ★ Polish候補の末尾にも改修語の抑止を追加（必要なら再度長さ救済）
+      candidate = stripRenovationClaimsFromText(candidate);
       if (countJa(candidate) < minChars) {
         candidate = await ensureLengthReview({ openai, draft: candidate, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
       }
