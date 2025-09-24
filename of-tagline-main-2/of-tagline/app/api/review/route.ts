@@ -33,10 +33,9 @@ const stripPriceAndSpaces = (s: string) =>
 
 /* 徒歩「約」必須化（半角/全角数字・余白に対応） */
 function enforceApproxForWalk(text: string): string {
-  // 徒歩6分 / 徒歩 6 分 / 徒歩６分 → 徒歩約6分/徒歩約６分
   return (text || "")
     .replace(/徒歩\s*([0-9０-９]+)\s*分/g, "徒歩約$1分")
-    .replace(/徒歩約約/g, "徒歩約"); // 二重約の保険
+    .replace(/徒歩約約/g, "徒歩約");
 }
 
 /* ---------- renovation blockers (改修表現の抑止) ---------- */
@@ -103,23 +102,16 @@ const JA_SENT_SPLIT = /(?<=[。！？\?])\s*(?=[^\s])/g;
 const splitSentencesJa = (t: string) => (t || "").replace(/\s+\n/g, "\n").trim().split(JA_SENT_SPLIT).map(s=>s.trim()).filter(Boolean);
 const isPoliteEnding = (s: string) => /(です|ます)(?:。|$)/.test(s);
 
-// 敬体維持の軽い言い換え
+// —— 敬体キープの弱い言い換え —— //
 const nounStopVariant = (s: string) => {
   return s
-    .replace(/はあります。$/, "を備えています。")
-    .replace(/があります。$/, "を備えています。")
+    .replace(/はあります。$/, "があります。")
+    .replace(/があります。$/, "があります。")
     .replace(/を設置しています。$/, "を設置しています。")
-    .replace(/を採用しています。$/, "を採用した意匠です。")
-    .replace(/を備えています。$/, "を備えた設えです。")
+    .replace(/を採用しています。$/, "を採用しています。")
+    .replace(/を備えています。$/, "を備えています。")
     .replace(/に位置しています。$/, "に位置します。")
     .replace(/に配慮しています。$/, "に配慮した計画です。");
-};
-
-const toPlainEnding = (s: string) => {
-  return s
-    .replace(/を備えています。$/, "の体制です。")
-    .replace(/が整っています。$/, "が整う環境です。")
-    .replace(/に配慮しています。$/, "に配慮した設計です。");
 };
 
 function enforceCadence(text: string, tone: string): string {
@@ -127,6 +119,7 @@ function enforceCadence(text: string, tone: string): string {
   const ss = splitSentencesJa(text);
   if (!ss.length) return text;
 
+  // 連続3敬体の中央だけを軽くパラフレーズ（最大2回まで）
   let tweaks = 0;
   for (let i = 0; i + 2 < ss.length; i++) {
     if (tweaks >= 2) break;
@@ -138,6 +131,7 @@ function enforceCadence(text: string, tone: string): string {
     }
   }
 
+  // 敬体比率の微調整（敬体のまま言い換え）最大2回
   const ratioPolite = ss.filter(isPoliteEnding).length / ss.length;
   if (ratioPolite > T.maxPolite) {
     let changed = 0;
@@ -150,6 +144,7 @@ function enforceCadence(text: string, tone: string): string {
     }
   }
 
+  // 接続詞の整理（連続「また、」を抑制）
   for (let i = 1; i < ss.length; i++) {
     ss[i] = ss[i].replace(/^(また|さらに|なお|そして)、/g, "$1、");
     if (i >= 2 && /^また/.test(ss[i]) && /^また/.test(ss[i - 1])) {
@@ -159,7 +154,7 @@ function enforceCadence(text: string, tone: string): string {
   return ss.join("");
 }
 
-/* ---------- phrase throttle（安全版） ---------- */
+/* ---------- phrase throttle（控えめ） ---------- */
 function throttlePhrases(text: string): string {
   const buckets: Array<{ re: RegExp; repls: string[]; maxKeep: number }> = [
     { re: /整って(?:い)?ます?/g, repls: ["備わっています", "体制が整えられています"], maxKeep: 1 },
@@ -276,6 +271,36 @@ function fixTruncatedEndings(text: string): string {
     .replace(/し。/g, "する。");
 }
 
+/* ---------- defragment helpers（見出し調の結合・短文つなぎ） ---------- */
+function defragmentHeadings(text: string): string {
+  let t = text || "";
+  // 「交通アクセス。」→「交通アクセスは、」
+  t = t.replace(/(?:^|[。\s])(交通アクセス)[。:\s]*/g, (m, p1) => `${p1}は、`);
+  // 「管理。」→「管理体制は、」「共用。」→「共用部は、」「周辺環境。」→「周辺環境は、」
+  t = t.replace(/(?:^|[。\s])(管理|共用|周辺環境)[。:\s]*/g, (_m, p) => (p === "管理" ? "管理体制は、" : p + "は、"));
+  return t;
+}
+
+/** 先頭が「物件名。」のような短い独立文なら、次文と結合 */
+function fuseShortLead(text: string): string {
+  const ss = splitSentencesJa(text);
+  if (ss.length >= 2 && ss[0].length <= 14 && /。$/.test(ss[0])) {
+    ss[0] = ss[0].replace(/。$/, "は、") + ss[1].replace(/^(?:は|も|が|に|で|を)/, "");
+    ss.splice(1, 1);
+  }
+  return ss.join("");
+}
+
+/** 仕上げの一括整形（ブツ切り→結合＆敬体維持） */
+function smoothenFlow(text: string): string {
+  let t = text || "";
+  t = defragmentHeadings(t);
+  t = fuseShortLead(t);
+  // 文末が敬体で終わるよう補正
+  t = splitSentencesJa(t).map(s => /(です|ます)。(?:$)/.test(s) ? s : s.replace(/。?$/, "です。")).join("");
+  return t;
+}
+
 /** 文字数調整（最大3回） */
 async function ensureLengthReview(opts: {
   openai: OpenAI; draft: string; min: number; max: number; tone: string; style: string; request?: string;
@@ -312,7 +337,7 @@ async function polishText(openai: OpenAI, text: string, tone: string, style: str
     'Return ONLY {"polished": string, "notes": string[]}. (json)\n' +
     [
       "あなたは日本語の不動産コピーの校閲・整文エディタです。",
-      "目的: 重複削減・冗長整理・段落のつながり改善・語尾の単調回避。",
+      "目的: 重複削減、冗長整理、段落のつながり改善、語尾の単調回避。",
       "禁止: 事実の新規追加・推測・誇張・住戸特定の再導入。",
       "禁止: 価格/金額/円/万円・電話番号・外部URLの出力。",
       `トーン:${tone}。以下のスタイルに準拠：\n${style}`,
@@ -408,6 +433,9 @@ export async function POST(req: Request) {
       summary = String(p?.summary ?? "");
     } catch { improved = text; }
 
+    // ドラフトとして控える（モデル一次出力）
+    const draft = improved;
+
     // ② サニタイズ & ③ 長さ調整
     improved = stripPriceAndSpaces(improved);
     improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE, request });
@@ -417,9 +445,10 @@ export async function POST(req: Request) {
     improved = throttlePhrases(improved);
     improved = enforceCadence(improved, tone);
     improved = fixTruncatedEndings(improved);
+    improved = smoothenFlow(improved);            // ★ 追加
     if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
 
-    // ★ 徒歩は必ず「約」を付与、改修語抑止、下限救済
+    // ★ 徒歩は必ず「約」、改修語抑止、下限救済
     improved = enforceApproxForWalk(improved);
     improved = stripRenovationClaimsFromText(improved);
     if (countJa(improved) < minChars) {
@@ -432,7 +461,7 @@ export async function POST(req: Request) {
       ? issues_structured_before.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`)
       : issuesTextFromModel;
 
-    // ⑦ 自動修正
+    // ⑦ 自動修正（住戸特定 → 一般の禁止/不当/商標）
     let auto_fixed = false;
 
     // a) 住戸特定（buildingのみ）
@@ -443,12 +472,13 @@ export async function POST(req: Request) {
       improved = throttlePhrases(improved);
       improved = enforceCadence(improved, tone);
       improved = fixTruncatedEndings(improved);
+      improved = smoothenFlow(improved);          // ★ 追加
       if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
       if (countJa(improved) < minChars) {
         improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
       }
-      improved = enforceApproxForWalk(improved);            // ★ 徒歩約
-      improved = stripRenovationClaimsFromText(improved);   // ★ 改修抑止
+      improved = enforceApproxForWalk(improved);
+      improved = stripRenovationClaimsFromText(improved);
     }
 
     // b) 一般の禁止/不当/商標
@@ -462,21 +492,16 @@ export async function POST(req: Request) {
       improved = throttlePhrases(improved);
       improved = enforceCadence(improved, tone);
       improved = fixTruncatedEndings(improved);
+      improved = smoothenFlow(improved);          // ★ 追加
       if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
       if (countJa(improved) < minChars) {
         improved = await ensureLengthReview({ openai, draft: improved, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
       }
-      improved = enforceApproxForWalk(improved);            // ★ 徒歩約
-      improved = stripRenovationClaimsFromText(improved);   // ★ 改修抑止
+      improved = enforceApproxForWalk(improved);
+      improved = stripRenovationClaimsFromText(improved);
     }
 
-    // ⑧ 再チェック（After：Polish前）
-    const issues_structured_after_check: CheckIssue[] = checkText(improved, { scope });
-    const issues_after: string[] = issues_structured_after_check.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`);
-
-    const text_after_check = improved;
-
-    // ⑨ 仕上げ（Polish）
+    // ⑧ Polish（仕上げ提案を作る）
     let polish_applied = false;
     let polish_notes: string[] = [];
     let text_after_polish: string | null = null;
@@ -489,36 +514,47 @@ export async function POST(req: Request) {
       candidate = throttlePhrases(candidate);
       candidate = enforceCadence(candidate, tone);
       candidate = fixTruncatedEndings(candidate);
+      candidate = smoothenFlow(candidate);        // ★ 追加
       if (countJa(candidate) > maxChars) candidate = hardCapJa(candidate, maxChars);
       if (countJa(candidate) < minChars) {
         candidate = await ensureLengthReview({ openai, draft: candidate, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
       }
-      candidate = enforceApproxForWalk(candidate);          // ★ 徒歩約
-      candidate = stripRenovationClaimsFromText(candidate); // ★ 改修抑止
+      candidate = enforceApproxForWalk(candidate);
+      candidate = stripRenovationClaimsFromText(candidate);
       if (countJa(candidate) < minChars) {
         candidate = await ensureLengthReview({ openai, draft: candidate, min: minChars, max: maxChars, tone, style: STYLE_GUIDE });
       }
 
       const checkAfterPolish = checkText(candidate, { scope });
       if (!checkAfterPolish.length) {
-        improved = candidate;
+        text_after_polish = candidate; // 仕上げ提案
         polish_applied = true;
         polish_notes = notes;
-        text_after_polish = candidate;
       }
     }
 
-    // ⑩ 最終チェック
+    // ⑨ 最終チェック（念のため）
     const issues_structured_final: CheckIssue[] = checkText(improved, { scope });
+
+    // UI用：安全チェック済（＝現行 improved）
+    const text_after_check = improved;
 
     return new Response(JSON.stringify({
       ok: true,
-      improved,
-      text_after_check,
-      text_after_polish,
+
+      // 旧キー（互換維持）
+      improved,                 // 最終採用（サーバ都合：現行は安全チェック済を採用）
+      text_after_check,         // 安全チェック済（旧：右②）
+      text_after_polish,        // 仕上げ提案（旧：右③）
+
+      // 新キー（表示ラベル）
+      draft,                    // ドラフト（初回生成）
+      clean: text_after_check,  // 安全チェック済
+      refined: text_after_polish, // 仕上げ提案
+
       issues: issues_before,
       issues_before,
-      issues_after,
+      issues_after: checkText(text_after_check, { scope }).map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`),
       issues_structured_before,
       issues_structured: issues_structured_final,
       auto_fixed,
