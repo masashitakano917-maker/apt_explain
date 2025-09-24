@@ -8,6 +8,14 @@ import { VARIANTS, TEMPLATES, pick, hashSeed, microPunctFix } from "../../../lib
 /* ---------- helpers（共通） ---------- */
 const countJa = (s: string) => Array.from(s || "").length;
 
+// replaceAll ポリフィル
+const repAll = (s: string, from: string, to: string) => s.split(from).join(to);
+const fillMap = (tmpl: string, map: Record<string, string>) => {
+  let out = tmpl;
+  for (const k in map) out = repAll(out, k, map[k]);
+  return out;
+};
+
 function hardCapJa(s: string, max: number): string {
   const arr = Array.from(s || "");
   if (arr.length <= max) return s;
@@ -66,12 +74,10 @@ function enforceCadence(text: string, tone: string): string {
   const ss = splitSentencesJa(text);
   if (!ss.length) return text;
 
-  // 3連続敬体の真ん中を名詞止めなどに変換
   for (let i=0;i+2<ss.length;i++){
     if (isPoliteEnding(ss[i]) && isPoliteEnding(ss[i+1]) && isPoliteEnding(ss[i+2])) ss[i+1]=nounStopVariant(ss[i+1]);
   }
 
-  // 目標比率へ補正
   const ratioPolite = ss.filter(isPoliteEnding).length / ss.length;
   if (ratioPolite > T.maxPolite) {
     for (let i=0; i<ss.length && (ss.filter(isPoliteEnding).length/ss.length)>T.aimPolite; i++) {
@@ -83,7 +89,6 @@ function enforceCadence(text: string, tone: string): string {
     }
   }
 
-  // 接続詞の連続を緩和
   for (let i=1;i<ss.length;i++){
     ss[i]=ss[i].replace(/^(また|さらに|なお|そして)、/g,"$1、");
     if (i>=2 && /^また/.test(ss[i]) && /^また/.test(ss[i-1])) ss[i]=ss[i].replace(/^また、?/,"");
@@ -106,7 +111,6 @@ const needsUnitFix = (issues: CheckIssue[]) =>
 function diversifyLexicon(text: string, seed: number): string {
   let out = text;
 
-  // 定番句のゆらぎ
   out = out.replace(/計画的に維持管理されています|維持管理されています|適切に維持管理されています|管理が行き届いています/g,
     pick(VARIANTS.managed, seed));
 
@@ -116,7 +120,6 @@ function diversifyLexicon(text: string, seed: number): string {
   out = out.replace(/落ち着いた住環境(が広がります|です)?|静穏な住環境です|静かな住環境です/g,
     pick(VARIANTS.calm, seed + 2));
 
-  // 微整形
   out = microPunctFix(out);
   return out;
 }
@@ -154,7 +157,7 @@ async function paraphrase(openai: OpenAI, text: string, tone: string, min: numbe
     ].join("\n");
   const r = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    temperature: 0.5, // 多様性を少し上げる
+    temperature: 0.5,
     response_format: { type: "json_object" },
     messages: [
       { role: "system", content: sys },
@@ -244,28 +247,32 @@ export async function POST(req: Request) {
     const STYLE_GUIDE = styleGuide(tone);
     const seed = hashSeed(name, url, String(minChars), String(maxChars));
 
-    /* ========== 0) ドラフトを“テンプレで軽く再構成”してベースを揺らす（安全） ========== */
-    const baseOutline = pick(TEMPLATES.outline, seed)
-      .replaceAll("【名】", name || "本物件")
-      .replaceAll("【駅】", meta?.station || "最寄駅")
-      .replaceAll("【分】", meta?.walk ? `約${meta.walk}分` : "約10分")
-      .replaceAll("【利便】", pick(VARIANTS.convenience, seed + 11))
-      .replaceAll("【静けさ】", pick(VARIANTS.calm, seed + 12));
+    /* ========== 0) テンプレで軽く再構成してベースを揺らす ========== */
+    const baseOutline = fillMap(pick(TEMPLATES.outline, seed), {
+      "【名】": name || "本物件",
+      "【駅】": meta?.station || "最寄駅",
+      "【分】": meta?.walk ? `約${meta.walk}分` : "約10分",
+      "【利便】": pick(VARIANTS.convenience, seed + 11),
+      "【静けさ】": pick(VARIANTS.calm, seed + 12),
+    });
 
-    const baseBuilding = pick(TEMPLATES.building, seed + 1)
-      .replaceAll("【階】", meta?.floors || "7")
-      .replaceAll("【戸】", meta?.units || "100")
-      .replace("{管理}", pick(VARIANTS.managed, seed + 13));
+    const baseBuilding = fillMap(pick(TEMPLATES.building, seed + 1), {
+      "【階】": meta?.floors || "7",
+      "【戸】": meta?.units || "100",
+      "{管理}": pick(VARIANTS.managed, seed + 13),
+    });
 
-    const baseAccess = pick(TEMPLATES.access, seed + 2)
-      .replaceAll("【駅】", meta?.station || "最寄駅");
+    const baseAccess = fillMap(pick(TEMPLATES.access, seed + 2), {
+      "【駅】": meta?.station || "最寄駅",
+    });
 
     const baseLife = pick(TEMPLATES.life, seed + 3);
-    const baseClose = pick(TEMPLATES.close, seed + 4).replaceAll("【名】", name || "本物件");
+    const baseClose = fillMap(pick(TEMPLATES.close, seed + 4), {
+      "【名】": name || "本物件",
+    });
 
     let improved = [baseOutline, baseBuilding, baseAccess, baseLife, baseClose].join("");
 
-    // 入力テキストも混ぜて情報欠落を補完（短縮）
     if (text && text.length > 50) improved = (improved + " " + text.slice(0, 400)).trim();
 
     /* ========== 1) サニタイズ & 正規化 ========== */
@@ -295,7 +302,6 @@ export async function POST(req: Request) {
 
     if (scope === "building" && needsUnitFix(issues_structured_before)) {
       auto_fixed = true;
-      // 住戸特定の機械除去
       improved = improved
         .replace(/[^。]*専有面積[^。]*。/g, "")
         .replace(RE_M2, "")
@@ -307,7 +313,6 @@ export async function POST(req: Request) {
       improved = microPunctFix(improved);
     }
 
-    // 一般NG: checkText の excerpt を機械除去（安全側）→軽い接続
     let issues_after_unit = checkText(improved, { scope });
     if (issues_after_unit.some(i => !i.id.startsWith("unit-"))) {
       auto_fixed = true;
@@ -319,9 +324,7 @@ export async function POST(req: Request) {
       improved = microPunctFix(improved);
     }
 
-    /* ========== 7) “安全チェック済” の版 ==========
-          → ここでユーザーが見たい「自然さ」を確保するために
-             もう一段軽整形を実施（句読点/重複/助詞） ========== */
+    /* ========== 7) “安全チェック済” 版（句読点/助詞をもう一段整える） ========== */
     let text_after_check = improved;
     text_after_check = cleanFragments(text_after_check);
     text_after_check = normalizeWalk(text_after_check);
@@ -355,9 +358,9 @@ export async function POST(req: Request) {
 
     return new Response(JSON.stringify({
       ok: true,
-      improved: text_after_polish || text_after_check, // 最終提示
-      text_after_check,         // ②
-      text_after_polish,        // ③（未採用なら null）
+      improved: text_after_polish || text_after_check,
+      text_after_check,
+      text_after_polish,
       issues_before: issues_before.length ? issues_before : undefined,
       issues_structured_before,
       issues_structured: issues_structured_final,
