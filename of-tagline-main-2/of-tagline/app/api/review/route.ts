@@ -104,8 +104,18 @@ const RE_PLAN   = /\b(?:[1-5]\s*LDK|[12]\s*DK|[1-3]\s*K|[1-3]\s*R)\b/gi;
 const RE_FLOOR  = /\d+\s*階部分/gi;
 const RE_UNIT_TERMS = /(角部屋|角住戸|最上階|高層階|低層階|南向き|東向き|西向き|北向き|南東向き|南西向き|北東向き|北西向き)/g;
 
+/* ★ 室内設備/住戸専用ワード（棟紹介では排除） */
+const RE_UNIT_FEATURES = /(ウォークインクローゼット|WIC|ウォークインCL|床暖房|浴室乾燥機|食器洗(?:い)?乾燥機|食洗機|ディスポーザー|カウンターキッチン|追い焚き|シューズインクローゼット|SIC)/g;
+
+/* ★ 将来断定/リフォーム予定の表現を安全側で中立化/除去 */
+const RE_FUTURE_RENOV = /(20\d{2}年(?:\d{1,2}月)?に?リフォーム(?:予定|完了予定)|リノベーション(?:予定|実施予定)|大規模修繕(?:予定|実施予定))/g;
+
+/* ---------- ニーズ判定 ---------- */
 const needsUnitFix = (issues: CheckIssue[]) =>
-  issues.some(i => i.id.startsWith("unit-") || /住戸|間取り|階数|㎡|帖|向き|角/.test(i.label + i.message + i.id));
+  issues.some(i =>
+    i.id.startsWith("unit-") ||
+    /住戸|間取り|階数|㎡|帖|向き|角|室内|設備/.test(i.label + i.message + i.id)
+  );
 
 /* ---------- 多様化：テンプレ＋辞書置換 ---------- */
 function diversifyLexicon(text: string, seed: number): string {
@@ -129,20 +139,45 @@ function normalizeWalk(text: string) {
   return text.replace(/徒歩\s*(\d+)\s*分/g, "徒歩約$1分");
 }
 
-/* ---------- 句読点・重複の応急修正 ---------- */
+/* ---------- 固有施設名の中立化（軽め・安全側） ---------- */
+function neutralizeProperNouns(text: string) {
+  let t = text;
+  // 「○○店」→「商業施設」
+  t = t.replace(/([一-龯ぁ-んァ-ンA-Za-z0-9・ー]{2,20})店/g, "商業施設");
+  // 「○○公園」→「公園」
+  t = t.replace(/([一-龯ぁ-んァ-ンA-Za-z0-9・ー]{2,20})公園/g, "公園");
+  // 学校・病院系
+  t = t.replace(/([一-龯ぁ-んァ-ンA-Za-z0-9・ー]{2,20})(小学校|中学校|高校|大学)/g, "学校");
+  t = t.replace(/([一-龯ぁ-んァ-ンA-Za-z0-9・ー]{2,20})(病院|クリニック)/g, "医療機関");
+  return t;
+}
+
+/* ---------- 句読点・重複の応急修正（拡張） ---------- */
 function cleanFragments(text: string): string {
   return (text || "")
+    // 接続前に句点を補う
     .replace(/(です|ます)(?=交通アクセス|共用|また|さらに)/g, "$1。")
+    // 重複終止
     .replace(/(です|ます)(です|ます)/g, "$1。")
+    // 「は、」、の重複
     .replace(/(は、)、/g, "$1")
+    // 連続読点/句点
     .replace(/、、+/g, "、")
+    .replace(/。。+/g, "。")
+    // 終止の後の「です。」重複
     .replace(/。\s*です。/g, "です。")
+    // 変な終止
     .replace(/くださいです。/g, "ください。")
+    .replace(/ですです/g, "です")
+    // 固有箇所
     .replace(/共用は、?部分/g, "共用部分")
     .replace(/建物は、、/g, "建物は、")
     .replace(/(です|ます)交通アクセス/g, "$1。交通アクセス")
-    .replace(/ですです/g, "です")
-    .replace(/^\s+|\s+$/g, "");
+    // 句読点と空白微調整
+    .replace(/，/g, "、")
+    .replace(/．/g, "。")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 /* ---------- 言い換えのための軽いパラフレーズ ---------- */
@@ -268,9 +303,7 @@ export async function POST(req: Request) {
     });
 
     const baseLife = pick(TEMPLATES.life, seed + 3);
-    const baseClose = fillMap(pick(TEMPLATES.close, seed + 4), {
-      "【名】": name || "本物件",
-    });
+    const baseClose = fillMap(pick(TEMPLATES.close, seed + 4), { "【名】": name || "本物件" });
 
     let improved = [baseOutline, baseBuilding, baseAccess, baseLife, baseClose].join("");
 
@@ -298,22 +331,31 @@ export async function POST(req: Request) {
     const issues_structured_before: CheckIssue[] = checkText(improved, { scope });
     const issues_before: string[] = issues_structured_before.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`);
 
-    /* ========== 6) 住戸特定 & 一般NGの自動修正 ========== */
+    /* ========== 6) 住戸特定 & 一般NGの自動修正（強化） ========== */
     let auto_fixed = false;
 
     if (scope === "building" && needsUnitFix(issues_structured_before)) {
       auto_fixed = true;
       improved = improved
+        // 住戸サイズ/間取り/階数・向きなど
         .replace(/[^。]*専有面積[^。]*。/g, "")
         .replace(RE_M2, "")
         .replace(RE_LDKSZ, "プラン構成に配慮")
         .replace(RE_TATAMI, "")
         .replace(RE_PLAN, "多様なプラン")
         .replace(/[^。]*\d+\s*階部分[^。]*。/g, "")
-        .replace(RE_UNIT_TERMS, "採光・通風に配慮");
+        .replace(RE_UNIT_TERMS, "採光・通風に配慮")
+        // 室内設備（住戸特有）
+        .replace(RE_UNIT_FEATURES, "")
+        // 将来断定/リフォーム予定は安全側で削除（または下の neutralize で緩和）
+        .replace(RE_FUTURE_RENOV, "改修等の情報は管理組合の方針に基づきご確認ください");
       improved = microPunctFix(improved);
     }
 
+    // 固有施設の一般化（安全側）
+    improved = neutralizeProperNouns(improved);
+
+    // 一般NG: checkText の excerpt を機械除去（安全側）→軽い接続
     let issues_after_unit = checkText(improved, { scope });
     if (issues_after_unit.some(i => !i.id.startsWith("unit-"))) {
       auto_fixed = true;
@@ -325,7 +367,7 @@ export async function POST(req: Request) {
       improved = microPunctFix(improved);
     }
 
-    /* ========== 7) “安全チェック済” 版 ========== */
+    /* ========== 7) “安全チェック済” 版（句読点/助詞をさらに整える） ========== */
     let text_after_check = improved;
     text_after_check = cleanFragments(text_after_check);
     text_after_check = normalizeWalk(text_after_check);
@@ -337,11 +379,11 @@ export async function POST(req: Request) {
     let text_after_polish: string | null = null;
 
     {
-      // ★ 修正点：STYLE_GUIDE を第4引数に渡す（合計6引数）
       const { polished, notes } = await polishText(openai, text_after_check, tone, STYLE_GUIDE, minChars, maxChars);
       let candidate = polished;
       candidate = stripPriceAndSpaces(candidate);
       candidate = normalizeWalk(candidate);
+      candidate = neutralizeProperNouns(candidate);
       candidate = microPunctFix(candidate);
       candidate = enforceCadence(candidate, tone);
       candidate = cleanFragments(candidate);
@@ -360,16 +402,17 @@ export async function POST(req: Request) {
 
     return new Response(JSON.stringify({
       ok: true,
-      improved: text_after_polish || text_after_check,
-      text_after_check,
-      text_after_polish,
-      issues_before: issues_before.length ? issues_before : undefined,
-      issues_structured_before,
-      issues_structured: issues_structured_final,
+      improved: text_after_polish || text_after_check, // 最終提示
+      text_after_check,         // ②
+      text_after_polish,        // ③（未採用なら null）
+      issues_before: issues_before.length ? issues_before : undefined, // 文字列版
+      issues_details_before: issues_structured_before,                 // 詳細（UIで理由表示用）
+      issues_structured_before,                                        // 互換
+      issues_structured: issues_structured_final,                      // 最終詳細
       auto_fixed,
       polish_applied,
       polish_notes,
-      summary: issues_before.join(" / ")
+      summary: (issues_before && issues_before.length) ? issues_before.join(" / ") : ""
     }), { status: 200, headers: { "content-type": "application/json" } });
 
   } catch (e: any) {
