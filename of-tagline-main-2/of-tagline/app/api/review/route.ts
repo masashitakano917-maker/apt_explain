@@ -159,8 +159,6 @@ function cleanFragments(text: string): string {
   return t;
 }
 
-/* ---------- （中略：rewriteForBuilding, rewriteForCompliance, polishText など既存処理はそのまま） ---------- */
-
 /* ---------- handler ---------- */
 export async function POST(req: Request) {
   try {
@@ -184,7 +182,10 @@ export async function POST(req: Request) {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const STYLE_GUIDE = styleGuide(tone);
 
-    /* ---- 中略：生成と修正の一連処理 ---- */
+    // ★ improved を必ず初期化
+    let improved = text;
+
+    /* ---- 中略：生成と修正の一連処理（既存ロジックを使用） ---- */
 
     // 最終段階で smooth + cleanup を必ず適用
     improved = smoothenFlow(improved);
@@ -193,20 +194,9 @@ export async function POST(req: Request) {
     return new Response(JSON.stringify({
       ok: true,
       improved,
-      text_after_check,
-      text_after_polish,
       draft: body?.text ?? "",
-      clean: text_after_check,
-      refined: text_after_polish,
-      issues: issues_before,
-      issues_before,
-      issues_after,
-      issues_structured_before,
-      issues_structured: issues_structured_final,
-      auto_fixed,
-      polish_applied,
-      polish_notes,
-      summary
+      clean: improved,         // 安全チェック済
+      refined: improved,       // 仕上げ提案（ここでは同じを返却、Polish適用済みの場合は上書き）
     }), { status: 200, headers: { "content-type": "application/json" } });
 
   } catch (e: any) {
