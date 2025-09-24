@@ -322,7 +322,7 @@ export default function Page() {
       <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b">
         <div className="max-w-7xl mx-auto px-5 py-3 flex items-center justify-between">
           <div className="text-lg font-semibold">マンション説明文作成</div>
-          <div className="text-xs text-neutral-500">Demo / Frontend with API</div>
+          <div className="text-xs text-neutral-500">Powered by MILZTECH</div>
         </div>
       </header>
 
