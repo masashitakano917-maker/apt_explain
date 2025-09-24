@@ -52,10 +52,10 @@ export default function Page() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 出力①②③
-  const [text1, setText1] = useState(""); // 初回生成
-  const [text2, setText2] = useState(""); // チェック後（自動修正済み）
-  const [text3, setText3] = useState(""); // 自動仕上げ（Polish）
+  // 出力（ドラフト／安全チェック済／仕上げ提案）
+  const [text1, setText1] = useState(""); // ドラフト
+  const [text2, setText2] = useState(""); // 安全チェック済
+  const [text3, setText3] = useState(""); // 仕上げ提案
 
   // 差分表示（①→②、②→③）
   const [diff12Html, setDiff12Html] = useState("");
@@ -95,7 +95,7 @@ export default function Page() {
 
       setBusy(true);
 
-      // ① 初回生成
+      // ① ドラフト（/api/describe は初回文だけ返す）
       const res = await fetch("/api/describe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -120,7 +120,7 @@ export default function Page() {
   async function handleCheck(baseText?: string, suppressBusy = false) {
     try {
       const src = (baseText ?? text1).trim();
-      if (!src) throw new Error("まず①の文章を生成してください。");
+      if (!src) throw new Error("まずドラフトを生成してください。");
       if (!suppressBusy) setBusy(true);
 
       setCheckStatus("running");
@@ -140,23 +140,27 @@ export default function Page() {
       const j = await res.json();
       if (!res.ok) throw new Error(j?.error || "チェックに失敗しました。");
 
-      // ② チェック後（中間）
-      const afterCheck = String(j?.text_after_check ?? j?.improved ?? src);
-      setText2(afterCheck);
+      // サーバーの新キーを最優先で利用（互換キーはフォールバック）
+      const draft       = String(j?.draft ?? src);
+      const afterCheck  = String(j?.clean ?? j?.text_after_check ?? j?.improved ?? src);
+      const afterPolish = typeof j?.refined === "string" ? j.refined
+                          : (typeof j?.text_after_polish === "string" ? j.text_after_polish : "");
 
+      // 画面の3段に反映
+      setText1(draft);
+      setText2(afterCheck);
+      setText3(afterPolish);
+
+      // 差分
+      setDiff12Html(markDiffRed(draft, afterCheck));
+      setDiff23Html(afterPolish ? markDiffRed(afterCheck, afterPolish) : "");
+
+      // 指摘・サマリ
       const issuesBefore = Array.isArray(j?.issues_before) ? j.issues_before
                         : Array.isArray(j?.issues) ? j.issues : [];
       const summary = j?.summary || (issuesBefore.length ? issuesBefore.join(" / ") : "");
       setIssues2(issuesBefore);
       setSummary2(summary);
-
-      // ③ 自動仕上げ（Polish）
-      const afterPolish = typeof j?.text_after_polish === "string" ? j.text_after_polish : "";
-      setText3(afterPolish);
-
-      // 差分
-      setDiff12Html(markDiffRed(src, afterCheck));
-      setDiff23Html(afterPolish ? markDiffRed(afterCheck, afterPolish) : "");
 
       // フラグとメモ
       setAutoFixed(Boolean(j?.auto_fixed));
@@ -300,7 +304,7 @@ export default function Page() {
 
             {/* 1行：自動チェックのステータス＋再実行 */}
             <div className="flex items-center justify-between rounded-xl border bg-neutral-50 px-3 py-2">
-              <div className="text-sm">自動チェック（初回生成後に自動実行）</div>
+              <div className="text-sm">自動チェック（ドラフト生成後に自動実行）</div>
               <div className="flex items-center gap-2">
                 <span className={cn("px-2 py-0.5 rounded-full text-xs", statusClass)}>{statusLabel}</span>
                 <Button
@@ -331,7 +335,7 @@ export default function Page() {
               <div className="space-y-3">
                 {!!diff12Html && (
                   <details open className="rounded border">
-                    <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分 ①→②（初回 → チェック後）</summary>
+                    <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分 ①→②（ドラフト → 安全チェック済）</summary>
                     <div
                       className="p-3 text-sm leading-relaxed"
                       dangerouslySetInnerHTML={{ __html: diff12Html }}
@@ -340,7 +344,7 @@ export default function Page() {
                 )}
                 {!!diff23Html && (
                   <details className="rounded border">
-                    <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分 ②→③（チェック後 → 自動仕上げ）</summary>
+                    <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分 ②→③（安全チェック済 → 仕上げ提案）</summary>
                     <div
                       className="p-3 text-sm leading-relaxed"
                       dangerouslySetInnerHTML={{ __html: diff23Html }}
@@ -354,10 +358,10 @@ export default function Page() {
 
         {/* 右カラム：3つの出力 */}
         <section className="space-y-4">
-          {/* 出力① 初回生成 */}
+          {/* 出力① ドラフト */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between">
-              <div className="text-sm font-medium">出力① 初回生成</div>
+              <div className="text-sm font-medium">ドラフト</div>
               <div className="flex items-center gap-3">
                 <div className="text-xs text-neutral-500">長さ：{jaLen(text1)} 文字</div>
                 <Button onClick={() => copy(text1)} disabled={!text1}>コピー</Button>
@@ -372,11 +376,11 @@ export default function Page() {
             </div>
           </div>
 
-          {/* 出力② チェック後（自動修正済み） */}
+          {/* 出力② 安全チェック済 */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between">
               <div className="text-sm font-medium flex items-center gap-2">
-                出力② チェック後（自動修正済み）
+                安全チェック済
                 {autoFixed ? (
                   <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">自動修正適用</span>
                 ) : (
@@ -407,11 +411,11 @@ export default function Page() {
             </div>
           </div>
 
-          {/* 出力③ 自動仕上げ（Polish） */}
+          {/* 出力③ 仕上げ提案 */}
           <div className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between">
               <div className="text-sm font-medium flex items-center gap-2">
-                出力③ 自動仕上げ（Polish）
+                仕上げ提案
                 {polishApplied ? (
                   <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">適用</span>
                 ) : (
@@ -441,9 +445,9 @@ export default function Page() {
 
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
-              ※ <code>/api/describe</code> が初回文（①）を生成。<code>/api/review</code> は<br/>
-              ②「チェック後（自動修正済み）」は <code>text_after_check</code>、<br/>
-              ③「自動仕上げ（Polish）」は <code>text_after_polish</code> を返します（未適用時は②を表示）。
+              ※ <code>/api/describe</code> がドラフト（①）を生成。<code>/api/review</code> は<br/>
+              ②「安全チェック済」は <code>clean</code>（互換: <code>text_after_check</code>）、<br/>
+              ③「仕上げ提案」は <code>refined</code>（互換: <code>text_after_polish</code>）を返します。
             </div>
           </div>
         </section>
