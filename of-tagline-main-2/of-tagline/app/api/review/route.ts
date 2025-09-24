@@ -204,7 +204,7 @@ function composeFromFacts(f: Facts, tone = "上品・落ち着いた"): string {
   if (f.station || f.walkMin) {
     const walk = f.walkMin ? `徒歩約${f.walkMin}分` : "";
     const at = f.station ? `「${f.station}」駅から${walk}` : walk;
-    if (at) S.push(`分譲マンションである本物件は、${at}に位置します。`);
+    if (at) S.push(`本物件は${at}に位置する分譲マンションです。`);
   }
 
   // ② 規模/構造/総戸数/階数/竣工
@@ -213,7 +213,7 @@ function composeFromFacts(f: Facts, tone = "上品・落ち着いた"): string {
     f.floors ? `地上${f.floors}階建` : "",
     f.units ? `総戸数${f.units}戸` : "",
   ].filter(Boolean).join("・");
-  if (scaleBits) S.push(`建物は${scaleBits}です。`);
+  if (scaleBits) S.push(`建物は${scaleBits}で、計画的に維持管理されています。`);
   if (f.builtYear) S.push(`${f.builtYear}年竣工の落ち着いた意匠です。`);
 
   // ③ 管理
@@ -231,7 +231,7 @@ function composeFromFacts(f: Facts, tone = "上品・落ち着いた"): string {
   if (f.hasConcierge) S.push(`必要に応じてコンシェルジュサービスも利用できます。`);
 
   // ⑥ まとめ
-  S.push(`落ち着いた住環境と利便性を兼ね備え、快適な暮らしを支える住まいです。`);
+  S.push(`落ち着いた住環境と利便性を兼ね備え、日々の暮らしを心地よく支える住まいです。`);
 
   return S.join("");
 }
@@ -285,6 +285,7 @@ async function ensureLengthSafe(opts: {
     try {
       const t = String(JSON.parse(r.choices?.[0]?.message?.content || "{}")?.text || out);
       out = stripPriceAndSpaces(enforceApproxForWalk(dropUnitSentencesCompletely(t)));
+      out = smoothenFlow(out);
     } catch {}
     if (countJa(out) > opts.max) out = hardCapJa(out, opts.max);
   }
@@ -336,7 +337,7 @@ export async function POST(req: Request) {
       minChars = 450,
       maxChars = 550,
       tone = "上品・落ち着いた",
-      scope = "building", // ここは常に building を想定
+      scope = "building",
     } = body || {};
 
     if (!text) {
@@ -346,27 +347,30 @@ export async function POST(req: Request) {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const STYLE = styleGuide(tone);
 
-    // 0) 入力テキストの安全化（住戸文まるごと除去・価格類除去・徒歩約付与・改修語除去）
-    const draft_raw = String(text || "");
-    let draft_safe = draft_raw;
+    /* --- 0) 元ドラフトに対するNG理由リスト（UI表示用） --- */
+    const issues_from_draft_structured: CheckIssue[] = checkText(String(text || ""), { scope: "building" });
+    const issues_from_draft = issues_from_draft_structured.map(
+      i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`
+    );
+
+    /* --- 1) 入力の安全化（価格除去→徒歩約→住戸文まるごと除去→改修語除去） --- */
+    let draft_safe = String(text || "");
     draft_safe = stripPriceAndSpaces(draft_safe);
     draft_safe = enforceApproxForWalk(draft_safe);
     draft_safe = dropUnitSentencesCompletely(draft_safe);
     draft_safe = stripRenovationClaimsFromText(draft_safe);
 
-    // 1) 事実抽出
+    /* --- 2) 事実抽出 → テンプレ再構成（安全チェック済の骨格） --- */
     const facts = extractBuildingFacts(draft_safe);
-
-    // 2) テンプレ再構成（“安全チェック済”の骨格）
     let composed = composeFromFacts(facts, tone);
     composed = enforceApproxForWalk(composed);
     composed = stripRenovationClaimsFromText(composed);
     composed = smoothenFlow(composed);
 
-    // 必要に応じ文字数調整（安全文のみで増減）
+    // 文字数調整（安全文のみで増減）
     composed = await ensureLengthSafe({ openai, draft: composed, min: minChars, max: maxChars, tone, style: STYLE });
 
-    // 3) ルール検査（棟紹介としてNGがあれば即除去→整形）
+    /* --- 3) ルール検査（棟紹介としてNGがあれば即除去→整形） --- */
     let issues_structured_before: CheckIssue[] = checkText(composed, { scope: "building" });
     if (issues_structured_before.length) {
       composed = scrubGenericByIssues(composed, issues_structured_before);
@@ -383,9 +387,8 @@ export async function POST(req: Request) {
     // “安全チェック済” を一旦これで確定
     const text_after_check = composed;
 
-    // 4) 仕上げ提案（装飾のみ）→ ゲート判定で“より良ければ採用”
+    /* --- 4) 仕上げ提案（装飾のみ）→ ゲート判定で採用可否 --- */
     let refined_candidate = await polishLite(openai, text_after_check, tone, STYLE, minChars, maxChars);
-    // polish後も安全確認
     const issues_after_polish = checkText(refined_candidate, { scope: "building" });
     const pen_base = fluencyPenalty(text_after_check);
     const pen_ref = fluencyPenalty(refined_candidate);
@@ -399,39 +402,42 @@ export async function POST(req: Request) {
       improved = refined_candidate;
       polish_applied = true;
     } else {
-      text_after_polish = null; // 候補は却下（UIでは未適用として表示）
+      text_after_polish = null; // 候補は却下
     }
 
-    // 最終の二重チェック（保険）
+    // 最終チェック（保険）
     const issues_structured_final: CheckIssue[] = checkText(improved, { scope: "building" });
 
-    // ラベル互換 & 追加メタ
+    /* --- レスポンス --- */
     return new Response(JSON.stringify({
       ok: true,
 
       // 最終採用
       improved,
 
-      // 表示用の3段
-      draft: draft_raw,              // ドラフト（元入力）
+      // 3段表示
+      draft: String(text || ""),     // ドラフト（元入力）
       clean: text_after_check,       // 安全チェック済
-      refined: text_after_polish,    // 仕上げ提案（採用された場合のみ文字列／不採用なら null）
+      refined: text_after_polish,    // 仕上げ提案（採用時のみ文字列／不採用なら null）
 
       // 互換キー（既存UI対応）
       text_after_check,
       text_after_polish,
 
-      // チェック情報（Beforeは“再構成直後”の指摘）
+      // NG理由（左ペイン表示用）
+      issues: issues_from_draft, // ★ 追加：ドラフトに対する「何が・なぜダメか」
       issues_before: issues_structured_before.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`),
+
+      // After/最終
       issues_after: issues_structured_final.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`),
       issues_structured_before,
       issues_structured: issues_structured_final,
 
-      // 参考メタ
-      auto_fixed: true,              // ルールベースで常に自動修正
+      // メタ
+      auto_fixed: true,
       polish_applied,
       polish_notes: polish_applied ? ["語尾・接続の整形を適用"] : [],
-      summary: ""
+      summary: issues_from_draft.slice(0, 5).join(" / ")
     }), { status: 200, headers: { "content-type": "application/json" } });
 
   } catch (e: any) {
