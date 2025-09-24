@@ -179,7 +179,8 @@ async function polishText(openai: OpenAI, text: string, tone: string, style: str
       "目的: 重複/冗長の削減、自然なつながり、句読点の補正、語尾の単調回避。",
       "禁止: 事実の新規追加・推測・誇張、住戸特定（帖・㎡・間取り・階数・向き）。",
       "表記: 徒歩は『徒歩約N分』。",
-      `トーン:${tone}。文字数:${min}〜${max}（全角）を概ね維持。`
+      `トーン:${tone}。文字数:${min}〜${max}（全角）を概ね維持。`,
+      `スタイル:\n${style}`,
     ].join("\n");
 
   const r = await openai.chat.completions.create({
@@ -324,7 +325,7 @@ export async function POST(req: Request) {
       improved = microPunctFix(improved);
     }
 
-    /* ========== 7) “安全チェック済” 版（句読点/助詞をもう一段整える） ========== */
+    /* ========== 7) “安全チェック済” 版 ========== */
     let text_after_check = improved;
     text_after_check = cleanFragments(text_after_check);
     text_after_check = normalizeWalk(text_after_check);
@@ -336,7 +337,8 @@ export async function POST(req: Request) {
     let text_after_polish: string | null = null;
 
     {
-      const { polished, notes } = await polishText(openai, text_after_check, tone, minChars, maxChars);
+      // ★ 修正点：STYLE_GUIDE を第4引数に渡す（合計6引数）
+      const { polished, notes } = await polishText(openai, text_after_check, tone, STYLE_GUIDE, minChars, maxChars);
       let candidate = polished;
       candidate = stripPriceAndSpaces(candidate);
       candidate = normalizeWalk(candidate);
