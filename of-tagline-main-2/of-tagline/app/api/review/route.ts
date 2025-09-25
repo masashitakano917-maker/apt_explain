@@ -7,6 +7,8 @@ import { VARIANTS, TEMPLATES, pick, hashSeed, microPunctFix } from "../../../lib
 
 /* ---------- helpers（共通） ---------- */
 const countJa = (s: string) => Array.from(s || "").length;
+
+// replaceAll ポリフィル
 const repAll = (s: string, from: string, to: string) => s.split(from).join(to);
 const fillMap = (tmpl: string, map: Record<string, string>) => {
   let out = tmpl;
@@ -25,6 +27,11 @@ function hardCapJa(s: string, max: number): string {
   }
   return upto.slice(0, cut > 0 ? cut : max).join("").trim();
 }
+
+const normMustWords = (src: unknown): string[] => {
+  const s: string = Array.isArray(src) ? (src as unknown[]).map(String).join(" ") : String(src ?? "");
+  return s.split(/[ ,、\s\n\/]+/).map(w => w.trim()).filter(Boolean);
+};
 
 const stripPriceAndSpaces = (s: string) =>
   (s || "")
@@ -94,14 +101,21 @@ const RE_TATAMI = /約?\s*\d{1,3}(?:\.\d+)?\s*(?:帖|畳|Ｊ|J|jo)/gi;
 const RE_M2     = /約?\s*\d{1,3}(?:\.\d+)?\s*(?:㎡|m²|m2|平米)/gi;
 const RE_LDKSZ  = /約?\s*\d{1,3}(?:\.\d+)?\s*(?:帖|畳)\s*の?\s*(?:[1-5]?(?:LDK|DK|K|L|S))/gi;
 const RE_PLAN   = /\b(?:[1-5]\s*LDK|[12]\s*DK|[1-3]\s*K|[1-3]\s*R)\b/gi;
+const RE_FLOOR  = /\d+\s*階部分/gi;
 const RE_UNIT_TERMS = /(角部屋|角住戸|最上階|高層階|低層階|南向き|東向き|西向き|北向き|南東向き|南西向き|北東向き|北西向き)/g;
 
 /* 室内設備/住戸専用ワード（棟紹介では排除） */
 const RE_UNIT_FEATURES = /(ウォークインクローゼット|WIC|ウォークインCL|床暖房|浴室乾燥機|食器洗(?:い)?乾燥機|食洗機|ディスポーザー|カウンターキッチン|追い焚き|シューズインクローゼット|SIC)/g;
 
-/* 将来断定/リフォーム予定（unit判定に依らず常時除去） */
-const RE_RENOV_STRICT = /(リフォーム|リノベーション)[^。]*。/g;
+/* 将来断定/リフォーム予定の表現を安全側で中立化/除去 */
 const RE_FUTURE_RENOV = /(20\d{2}年(?:\d{1,2}月)?に?リフォーム(?:予定|完了予定)|リノベーション(?:予定|実施予定)|大規模修繕(?:予定|実施予定))/g;
+
+/* ---------- ニーズ判定 ---------- */
+const needsUnitFix = (issues: CheckIssue[]) =>
+  issues.some(i =>
+    i.id.startsWith("unit-") ||
+    /住戸|間取り|階数|㎡|帖|向き|角|室内|設備/.test(i.label + i.message + i.id)
+  );
 
 /* ---------- 多様化：テンプレ＋辞書置換 ---------- */
 function diversifyLexicon(text: string, seed: number): string {
@@ -163,21 +177,26 @@ async function fetchRehouseMeta(url: string): Promise<ScrapedMeta> {
     const html = await res.text();
     const meta: ScrapedMeta = {};
 
+    // 駅名：「○○」駅
     const mStation = html.match(/「([^」]+)」駅/);
     if (mStation) meta.station = mStation[1].trim();
 
+    // 徒歩分：徒歩xx分 / 徒歩 約xx分
     const mWalk = html.match(/徒歩\s*約?\s*(\d{1,2})\s*分/);
     if (mWalk) meta.walk = Number(mWalk[1]);
 
+    // 構造：鉄骨鉄筋コンクリート / 鉄筋コンクリート / SRC / RC
     if (/鉄骨鉄筋コンクリート/.test(html) || /SRC/i.test(html)) {
       meta.structure = "鉄骨鉄筋コンクリート造";
     } else if (/鉄筋コンクリート/.test(html) || /RC/i.test(html)) {
       meta.structure = "鉄筋コンクリート造";
     }
 
+    // 総戸数：総戸数 49戸 / 総戸数：49戸
     const mUnits = html.match(/総戸数[^0-9]{0,6}(\d{1,4})\s*戸/);
     if (mUnits) meta.units = Number(mUnits[1]);
 
+    // 階数：地上7階建 / 地上 7 階
     const mFloors = html.match(/地上\s*(\d{1,3})\s*階/);
     if (mFloors) meta.floors = Number(mFloors[1]);
 
@@ -187,15 +206,15 @@ async function fetchRehouseMeta(url: string): Promise<ScrapedMeta> {
   }
 }
 
-/* ---------- 事実ロック：確定した数値/固有事項は改変禁止で保持 ---------- */
+/* ---------- 事実ロック：駅名/徒歩/構造/総戸数/階数（総戸数は無ければ挿入） ---------- */
 function applyLockedFacts(text: string, facts: ScrapedMeta): string {
-  let t = text;
+  let t = text || "";
 
-  // 駅名・徒歩
+  // 駅名・徒歩（上書き）
   if (facts.station) t = t.replace(/「[^」]+」駅/g, `「${facts.station}」駅`);
   if (typeof facts.walk === "number") t = t.replace(/徒歩\s*約?\s*\d+\s*分/g, `徒歩約${facts.walk}分`);
 
-  // 構造
+  // 構造（上書き：SRC/RC の別表記にも対応。無ければ後で追加してもOK）
   if (facts.structure) {
     t = t
       .replace(/鉄骨鉄筋コンクリート造|鉄筋コンクリート造/g, facts.structure)
@@ -203,9 +222,11 @@ function applyLockedFacts(text: string, facts: ScrapedMeta): string {
       .replace(/\bRC\b/g, "鉄筋コンクリート造");
   }
 
-  // 総戸数（表現ゆれを網羅）
+  // 総戸数（上書き + 無ければ挿入）
   if (typeof facts.units === "number") {
     const u = String(facts.units);
+
+    // 既存表現の置換（表現ゆれ網羅）
     const unitPatterns: RegExp[] = [
       /総戸数[^0-9]{0,10}\d{1,4}\s*戸/g,
       /総戸数は?\s*\d{1,4}\s*戸(?:を(?:有し|擁し|誇り))?/g,
@@ -215,16 +236,33 @@ function applyLockedFacts(text: string, facts: ScrapedMeta): string {
       /全\s*\d{1,4}\s*戸/g,
     ];
     for (const re of unitPatterns) t = t.replace(re, `総戸数は${u}戸`);
+
+    // まだ登場していなければ自然な位置に追加
+    const hasUnits =
+      /(総戸数|全戸数)[^。]{0,12}\d{1,4}\s*戸/.test(t) || /総戸数は\d{1,4}戸/.test(t);
+
+    if (!hasUnits) {
+      // 構造文の直後に差し込み → なければ1文目の直後に差し込み
+      const afterStructure = t.replace(
+        /(鉄骨鉄筋コンクリート造|鉄筋コンクリート造)(です。|。)/,
+        `$1です。 総戸数は${u}戸です。`
+      );
+      if (afterStructure !== t) {
+        t = afterStructure;
+      } else {
+        const m = t.match(/[^。]*。/); // 最初の1文
+        t = m ? t.replace(m[0], m[0] + ` 総戸数は${u}戸です。`) : (t + ` 総戸数は${u}戸です。`);
+      }
+    }
   }
 
-  // 階数（参考）
+  // 階数（参考：上書きのみ）
   if (typeof facts.floors === "number") {
     t = t.replace(/地上\s*\d{1,3}\s*階/g, `地上${facts.floors}階`);
   }
 
-  // 徒歩「約」統一
-  t = normalizeWalk(t);
-  return t;
+  // 徒歩「約」表記を統一
+  return normalizeWalk(t);
 }
 
 /* ---------- 言い換えのための軽いパラフレーズ ---------- */
@@ -314,11 +352,13 @@ export async function POST(req: Request) {
       text = "",
       name = "",
       url = "",
+      mustWords = [],
       minChars = 450,
       maxChars = 550,
+      request = "",
       tone = "上品・落ち着いた",
-      scope = "building",
-      meta = {} as any,
+      scope = "building", // "building" | "unit"
+      meta = {} as any,     // 任意メタ
     } = body || {};
 
     if (!text) {
@@ -329,9 +369,11 @@ export async function POST(req: Request) {
     const STYLE_GUIDE = styleGuide(tone);
     const seed = hashSeed(name, url, String(minChars), String(maxChars));
 
-    /* 0) Rehouse から事実抽出 */
+    /* ========== 0) Rehouse URL から正データを抽出 → meta へ流し込み（事実ロック用） ========== */
     let scraped: ScrapedMeta = {};
-    if (/rehouse\.co\.jp/.test(String(url))) scraped = await fetchRehouseMeta(url);
+    if (/rehouse\.co\.jp/.test(String(url))) {
+      scraped = await fetchRehouseMeta(url);
+    }
     const lockedMeta: ScrapedMeta = {
       station: meta?.station || scraped.station,
       walk: typeof meta?.walk === "number" ? meta.walk : (typeof scraped.walk === "number" ? scraped.walk : undefined),
@@ -340,7 +382,7 @@ export async function POST(req: Request) {
       units: typeof meta?.units === "number" ? meta.units : scraped.units,
     };
 
-    /* 1) ドラフト（軽いテンプレ） */
+    /* ========== 1) テンプレで軽く再構成してベースを揺らす（デフォ値は空で安全側） ========== */
     const baseOutline = fillMap(TEMPLATES.outline[Math.abs(seed)%TEMPLATES.outline.length], {
       "【名】": name || "本物件",
       "【駅】": lockedMeta.station || "最寄駅",
@@ -348,68 +390,73 @@ export async function POST(req: Request) {
       "【利便】": pick(VARIANTS.convenience, seed + 11),
       "【静けさ】": pick(VARIANTS.calm, seed + 12),
     });
+
     const baseBuilding = fillMap(TEMPLATES.building[Math.abs(seed+1)%TEMPLATES.building.length], {
       "【階】": (typeof lockedMeta.floors === "number" ? String(lockedMeta.floors) : ""),
       "【戸】": (typeof lockedMeta.units === "number" ? String(lockedMeta.units) : ""),
       "{管理}": pick(VARIANTS.managed, seed + 13),
     });
+
     const baseAccess = fillMap(TEMPLATES.access[Math.abs(seed+2)%TEMPLATES.access.length], {
       "【駅】": lockedMeta.station || "最寄駅",
     });
-    const baseLife  = TEMPLATES.life[Math.abs(seed+3)%TEMPLATES.life.length];
+
+    const baseLife = TEMPLATES.life[Math.abs(seed+3)%TEMPLATES.life.length];
     const baseClose = fillMap(TEMPLATES.close[Math.abs(seed+4)%TEMPLATES.close.length], {
       "【名】": name || "本物件",
     });
 
     let improved = [baseOutline, baseBuilding, baseAccess, baseLife, baseClose].join("");
+
     if (text && text.length > 50) improved = (improved + " " + text.slice(0, 400)).trim();
 
-    /* 2) サニタイズ（常時：リフォーム除去）＋事実ロック早期適用 */
-    improved = stripPriceAndSpaces(improved)
-      .replace(RE_RENOV_STRICT, "");
+    /* ========== 2) サニタイズ & 正規化 ========== */
+    improved = stripPriceAndSpaces(improved);
     improved = neutralizeProperNouns(improved);
     improved = normalizeWalk(improved);
     improved = microPunctFix(improved);
-    improved = applyLockedFacts(improved, lockedMeta);
 
-    /* 3) 多様化 */
+    /* ========== 3) 多様化（辞書置換） ========== */
     improved = diversifyLexicon(improved, seed);
-    improved = applyLockedFacts(improved, lockedMeta);
 
-    /* 4) 軽パラフレーズ */
+    /* ========== 4) 軽いパラフレーズで自然化（事実ロック前） ========== */
     improved = await paraphrase(openai, improved, tone, minChars, maxChars);
     improved = normalizeWalk(improved);
     improved = microPunctFix(improved);
+
+    /* ========== 5) 事実ロック（駅名/徒歩/構造/総戸数/階数の固定） ========== */
     improved = applyLockedFacts(improved, lockedMeta);
 
-    /* 5) 整形 */
+    /* ========== 6) 語尾/リズム & 句読点の整形 ========== */
     improved = enforceCadence(improved, tone);
     improved = cleanFragments(improved);
-    improved = applyLockedFacts(improved, lockedMeta);
     if (countJa(improved) > maxChars) improved = hardCapJa(improved, maxChars);
 
-    /* 6) チェック（before） */
+    /* ========== 7) チェック（Before） ========== */
     const issues_structured_before: CheckIssue[] = checkText(improved, { scope });
     const issues_before: string[] = issues_structured_before.map(i => `${i.category} / ${i.label}：${i.excerpt} → ${i.message}`);
 
-    /* 7) 住戸特定/一般NG自動修正（強化） */
+    /* ========== 8) 住戸特定 & 一般NGの自動修正（強化） ========== */
     let auto_fixed = false;
-    if (scope === "building") {
+
+    if (scope === "building" && needsUnitFix(issues_structured_before)) {
       auto_fixed = true;
       improved = improved
-        .replace(/[^。]*(?:\d+\s*階(部分)?|号室|角部屋)[^。]*。/g, "") // ← 住戸特定の文章を丸ごと削除
+        .replace(/[^。]*専有面積[^。]*。/g, "")
         .replace(RE_M2, "")
         .replace(RE_LDKSZ, "プラン構成に配慮")
         .replace(RE_TATAMI, "")
         .replace(RE_PLAN, "多様なプラン")
+        .replace(/[^。]*\d+\s*階部分[^。]*。/g, "")
         .replace(RE_UNIT_TERMS, "採光・通風に配慮")
         .replace(RE_UNIT_FEATURES, "")
         .replace(RE_FUTURE_RENOV, "改修等の情報は管理組合の方針に基づきご確認ください");
       improved = microPunctFix(improved);
-      improved = applyLockedFacts(improved, lockedMeta);
     }
 
-    // 一般NG（checkPolicy側のexcerptを安全に除去）
+    improved = neutralizeProperNouns(improved);
+
+    // 一般NG: checkText の excerpt を機械除去（安全側）→軽い接続
     let issues_after_unit = checkText(improved, { scope });
     if (issues_after_unit.some(i => !i.id.startsWith("unit-"))) {
       auto_fixed = true;
@@ -419,29 +466,27 @@ export async function POST(req: Request) {
         improved = improved.replace(re, "");
       }
       improved = microPunctFix(improved);
-      improved = applyLockedFacts(improved, lockedMeta);
     }
 
-    /* 8) “安全チェック済” 版 */
+    /* ========== 9) “安全チェック済” 版 ========== */
     let text_after_check = improved;
     text_after_check = cleanFragments(text_after_check);
     text_after_check = normalizeWalk(text_after_check);
-    text_after_check = applyLockedFacts(text_after_check, lockedMeta);
+    text_after_check = applyLockedFacts(text_after_check, lockedMeta); // 念押し
     text_after_check = microPunctFix(text_after_check);
 
-    /* 9) 仕上げ（Polish） */
+    /* ========== 10) 仕上げ提案（Polish） ========== */
     let polish_applied = false;
     let polish_notes: string[] = [];
     let text_after_polish: string | null = null;
 
     {
-      const STYLE = styleGuide(tone);
-      const { polished, notes } = await polishText(openai, text_after_check, tone, STYLE, minChars, maxChars);
+      const { polished, notes } = await polishText(openai, text_after_check, tone, STYLE_GUIDE, minChars, maxChars);
       let candidate = polished;
-      candidate = stripPriceAndSpaces(candidate).replace(RE_RENOV_STRICT, "");
+      candidate = stripPriceAndSpaces(candidate);
       candidate = neutralizeProperNouns(candidate);
       candidate = normalizeWalk(candidate);
-      candidate = applyLockedFacts(candidate, lockedMeta);
+      candidate = applyLockedFacts(candidate, lockedMeta); // 仕上げでも改変禁止を再適用
       candidate = microPunctFix(candidate);
       candidate = enforceCadence(candidate, tone);
       candidate = cleanFragments(candidate);
@@ -455,7 +500,7 @@ export async function POST(req: Request) {
       }
     }
 
-    /* 10) 最終チェック */
+    /* ========== 11) 最終チェック ========== */
     const issues_structured_final: CheckIssue[] = checkText(text_after_polish || text_after_check, { scope });
 
     return new Response(JSON.stringify({
@@ -471,7 +516,7 @@ export async function POST(req: Request) {
       polish_applied,
       polish_notes,
       summary: (issues_before && issues_before.length) ? issues_before.join(" / ") : "",
-      locked_meta: lockedMeta,
+      locked_meta: lockedMeta, // UIデバッグ用
     }), { status: 200, headers: { "content-type": "application/json" } });
 
   } catch (e: any) {
