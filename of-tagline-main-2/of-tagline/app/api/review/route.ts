@@ -303,6 +303,30 @@ function applyLockedFacts(text: string, facts: ScrapedMeta): string {
   return normalizeWalk(t);
 }
 
+/* ---------- 駅表記の正規化（「駅」＋「から」の欠落補修） ---------- */
+function enforceStationPhrase(text: string, facts: ScrapedMeta): string {
+  let t = text || "";
+  if (facts.station && typeof facts.walk === "number") {
+    // 既に正しい形が無ければ先頭文を正規形に
+    const correct = new RegExp(`「${facts.station}」駅から徒歩約${facts.walk}分`);
+    if (!correct.test(t)) {
+      // 駅名だけの表記や「上板橋徒歩約9分」等を正規形へ
+      t = t
+        .replace(/「[^」]+」駅徒歩約(\d+)分/g, `「${facts.station}」駅から徒歩約$1分`)
+        .replace(/(上板橋|[^」\s]+)徒歩約(\d+)分/g, `「${facts.station}」駅から徒歩約$2分`);
+      if (!correct.test(t)) {
+        // まだ無ければ冒頭に追加
+        t = `「${facts.station}」駅から徒歩約${facts.walk}分の立地です。` + (t.startsWith("。") ? t.slice(1) : " " + t);
+      }
+    }
+  } else if (facts.station && !/「[^」]+」駅/.test(t)) {
+    t = `「${facts.station}」駅に近接する立地です。 ${t}`;
+  } else if (typeof facts.walk === "number" && !/徒歩約\d+分/.test(t)) {
+    t = `徒歩約${facts.walk}分の立地です。 ${t}`;
+  }
+  return t.replace(/駅から徒歩約(\d+)分分/g, "駅から徒歩約$1分");
+}
+
 /* ---------- NG の文単位サニタイズ ---------- */
 function sanitizeByIssues(text: string, issues: CheckIssue[]): string {
   if (!issues?.length) return text;
@@ -486,27 +510,28 @@ export async function POST(req: Request) {
       "【名】": name || "本物件",
     });
 
-    let improved = [baseOutline, baseBuilding, baseAccess, baseLife, baseClose].join("");
-    if (text && text.length > 50) improved = (improved + " " + text.slice(0, 400)).trim();
+    let draft = [baseOutline, baseBuilding, baseAccess, baseLife, baseClose].join("");
+    if (text && text.length > 50) draft = (draft + " " + text.slice(0, 400)).trim();
 
     /* 2) サニタイズ & 正規化（早期に住戸/将来予定を落とす） */
-    improved = stripPriceAndSpaces(improved);
-    improved = improved.replace(RE_UNIT_FEATURES, "");
-    improved = improved.replace(RE_FUTURE_RENOV, "");
-    improved = neutralizeProperNouns(improved);
-    improved = normalizeWalk(improved);
-    improved = microPunctFix(improved);
+    draft = stripPriceAndSpaces(draft);
+    draft = draft.replace(RE_UNIT_FEATURES, "");
+    draft = draft.replace(RE_FUTURE_RENOV, "");
+    draft = neutralizeProperNouns(draft);
+    draft = normalizeWalk(draft);
+    draft = microPunctFix(draft);
 
     /* ★ プレースホルダ固定（以降のモデル工程で数値を守る） */
-    const masked1 = maskLockedFacts(improved, lockedMeta);
+    const masked1 = maskLockedFacts(draft, lockedMeta);
 
     /* 3) 多様化（辞書置換）→ パラフレーズ */
-    let draft = diversifyLexicon(masked1.masked, seed);
+    draft = diversifyLexicon(masked1.masked, seed);
     draft = await paraphrase(openai, draft, tone, minChars, maxChars);
 
     // 復元→ロック適用→整形
     draft = unmaskLockedFacts(draft, masked1.tokens);
     draft = applyLockedFacts(draft, lockedMeta);
+    draft = enforceStationPhrase(draft, lockedMeta);
     draft = normalizeWalk(draft);
     draft = microPunctFix(draft);
 
@@ -543,14 +568,16 @@ export async function POST(req: Request) {
       draft = sanitizeByIssues(draft, issues_structured_before.filter(i => !i.id.startsWith("unit-")));
     }
 
-    // ここでもう一度事実ロックを強制
+    // ここでもう一度事実ロックを強制 + 駅表記を正規化
     draft = applyLockedFacts(draft, lockedMeta);
+    draft = enforceStationPhrase(draft, lockedMeta);
     draft = normalizeWalk(draft);
     draft = cleanFragments(draft);
 
     /* 7) “安全チェック済” */
     let text_after_check = draft;
     text_after_check = applyLockedFacts(text_after_check, lockedMeta);
+    text_after_check = enforceStationPhrase(text_after_check, lockedMeta);
     text_after_check = normalizeWalk(text_after_check);
     text_after_check = microPunctFix(text_after_check);
     text_after_check = enforceCadence(text_after_check, tone);
@@ -571,6 +598,7 @@ export async function POST(req: Request) {
       candidate = stripPriceAndSpaces(candidate);
       candidate = neutralizeProperNouns(candidate);
       candidate = applyLockedFacts(candidate, lockedMeta);
+      candidate = enforceStationPhrase(candidate, lockedMeta);
       candidate = normalizeWalk(candidate);
       candidate = microPunctFix(candidate);
       candidate = enforceCadence(candidate, tone);
