@@ -15,6 +15,7 @@ const fillMap = (tmpl: string, map: Record<string, string>) => {
   return out;
 };
 const DIGIT = "[0-9０-９]";
+const Z2H = (n: string) => String("０１２３４５６７８９".indexOf(n));
 
 function hardCapJa(s: string, max: number): string {
   const arr = Array.from(s || "");
@@ -110,6 +111,9 @@ const RE_UNIT_FEATURES = /(ウォークインクローゼット|WIC|ウォーク
 /* 将来断定/リフォーム予定の表現を安全側で中立化/除去 */
 const RE_FUTURE_RENOV = /(20[0-9０-９]{2}年(?:[0-9０-９]{1,2}月)?に?リフォーム(?:予定|完了予定)|リノベーション(?:予定|実施予定)|大規模修繕(?:予定|実施予定))/g;
 
+/* 都心系で誤爆しやすい“根拠薄い主張”を抑制するキーワード（暫定：オンライン検証なし版） */
+const WEAK_CLAIMS = /(緑豊か|豊かな緑|公園が点在|文化施設が点在|路線バス|駐車場が完備|学校が近い)/;
+
 /* ---------- ニーズ判定 ---------- */
 const needsUnitFix = (issues: CheckIssue[]) =>
   issues.some(i =>
@@ -198,30 +202,55 @@ function cleanFragments(text: string): string {
 }
 
 /* ---------- Rehouse スクレイピング ---------- */
-type ScrapedMeta = { station?: string; walk?: number; structure?: string; floors?: number; units?: number };
+type ScrapedMeta = {
+  station?: string; walk?: number; structure?: string; floors?: number; units?: number;
+  managerStyle?: string; contractor?: string; address?: string; builtYM?: string;
+};
+
+function pickCell(html: string, label: string): string | undefined {
+  // 「label</th><td>value</td>」型・「label</dt><dd>value</dd>」型の両対応
+  const re = new RegExp(`${label}\\s*</(?:th|dt)>\\s*<(?:td|dd)>([\\s\\S]*?)</(?:td|dd)>`, "i");
+  const m = html.match(re);
+  if (!m) return;
+  return m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+}
+
 async function fetchRehouseMeta(url: string): Promise<ScrapedMeta> {
   try {
     const res = await fetch(url, { cache: "no-store" });
-    const html = await res.text();
+    const raw = await res.text();
+    const html = raw.replace(/\r?\n/g, " ").replace(/\s{2,}/g, " ");
+
     const meta: ScrapedMeta = {};
 
+    // 駅名
     const mStation = html.match(/「([^」]+)」駅/);
     if (mStation) meta.station = mStation[1].trim();
 
+    // 徒歩
     const mWalk = html.match(/徒歩\s*約?\s*([0-9０-９]{1,2})\s*分/);
-    if (mWalk) meta.walk = Number(String(mWalk[1]).replace(/[０-９]/g, s => String("０１２３４５６７８９".indexOf(s))));
+    if (mWalk) meta.walk = Number(String(mWalk[1]).replace(/[０-９]/g, Z2H));
 
+    // 構造
     if (/鉄骨鉄筋コンクリート/.test(html) || /SRC/i.test(html)) {
       meta.structure = "鉄骨鉄筋コンクリート造";
     } else if (/鉄筋コンクリート/.test(html) || /RC/i.test(html)) {
       meta.structure = "鉄筋コンクリート造";
     }
 
+    // 総戸数
     const mUnits = html.match(new RegExp(`総戸数[^0-9０-９]{0,6}([0-9０-９]{1,4})\\s*戸`));
-    if (mUnits) meta.units = Number(String(mUnits[1]).replace(/[０-９]/g, s => String("０１２３４５６７８９".indexOf(s))));
+    if (mUnits) meta.units = Number(String(mUnits[1]).replace(/[０-９]/g, Z2H));
 
+    // 階数
     const mFloors = html.match(new RegExp(`地上\\s*([0-9０-９]{1,3})\\s*階`));
-    if (mFloors) meta.floors = Number(String(mFloors[1]).replace(/[０-９]/g, s => String("０１２３４５６７８９".indexOf(s))));
+    if (mFloors) meta.floors = Number(String(mFloors[1]).replace(/[０-９]/g, Z2H));
+
+    // 追加：所在地 / 築年月 / 管理員の勤務形態 / 施工会社
+    meta.address      = pickCell(html, "所在地");
+    meta.builtYM      = pickCell(html, "築年月");
+    meta.managerStyle = pickCell(html, "管理員の勤務形態");
+    meta.contractor   = pickCell(html, "施工会社");
 
     return meta;
   } catch {
@@ -323,12 +352,33 @@ function applyLockedFacts(text: string, facts: ScrapedMeta): string {
   return normalizeWalk(t);
 }
 
-/* ---------- 最終ガード（二重ロック） ---------- */
+/* ---------- 最終ガード（重複排除＋二重ロック） ---------- */
+function dedupeFacts(text: string, facts: ScrapedMeta): string {
+  let t = text || "";
+  if (facts.units) {
+    const u = facts.units;
+    const re = new RegExp(`(総戸数は${u}戸です。?\\s*){2,}`, "g");
+    t = t.replace(re, `総戸数は${u}戸です。`);
+  }
+  if (facts.station && facts.walk) {
+    const re = new RegExp(`(「${facts.station}」駅から徒歩約${facts.walk}分。?\\s*){2,}`, "g");
+    t = t.replace(re, `「${facts.station}」駅から徒歩約${facts.walk}分。`);
+  }
+  return t;
+}
+
 function forceFacts(text: string, facts: ScrapedMeta): string {
   let t = applyLockedFacts(text, facts);
   t = normalizeStationAndWalk(t, facts.station, facts.walk);
   t = t.replace(/(「[^」]+」駅から徒歩約[0-9０-９]+分)。?\s*\1/g, "$1");
+  t = dedupeFacts(t, facts);
   return cleanFragments(t);
+}
+
+/* ---------- “根拠薄い主張”の抑制（オンライン検証なし版：文単位で除去） ---------- */
+function dropWeakClaims(text: string): string {
+  const ss = splitSentencesJa(text);
+  return ss.filter(s => !WEAK_CLAIMS.test(s)).join("");
 }
 
 /* ---------- NG の文単位サニタイズ ---------- */
@@ -486,6 +536,10 @@ export async function POST(req: Request) {
       structure: meta?.structure || scraped.structure,
       floors: typeof meta?.floors === "number" ? meta.floors : scraped.floors,
       units: typeof meta?.units === "number" ? meta.units : scraped.units,
+      managerStyle: meta?.managerStyle || scraped.managerStyle,
+      contractor: meta?.contractor || scraped.contractor,
+      address: meta?.address || scraped.address,
+      builtYM: meta?.builtYM || scraped.builtYM,
     };
 
     /* 1) テンプレで軽く再構成（未知値は空・安全側） */
@@ -512,11 +566,12 @@ export async function POST(req: Request) {
     let improved = [baseOutline, baseBuilding, baseAccess, baseLife, baseClose].join("");
     if (text && text.length > 50) improved = (improved + " " + text.slice(0, 400)).trim();
 
-    /* 2) サニタイズ & 正規化（早期に住戸/将来予定を落とす） */
+    /* 2) サニタイズ & 正規化（早期に住戸/将来予定/弱主張を落とす） */
     improved = stripPriceAndSpaces(improved);
-    improved = improved.replace(RE_UNIT_TERMS, "");           // ★ 住戸特定ワードは早期に全削除
+    improved = improved.replace(RE_UNIT_TERMS, "");
     improved = improved.replace(RE_UNIT_FEATURES, "");
     improved = improved.replace(RE_FUTURE_RENOV, "");
+    improved = dropWeakClaims(improved);         // ★ “緑豊か/公園が点在”等を初期段で除去
     improved = neutralizeProperNouns(improved);
     improved = normalizeWalk(improved);
     improved = microPunctFix(improved);
@@ -567,10 +622,12 @@ export async function POST(req: Request) {
       draft = sanitizeByIssues(draft, issues_structured_before.filter(i => !i.id.startsWith("unit-")));
     }
 
+    draft = dropWeakClaims(draft);
     draft = forceFacts(draft, lockedMeta);
 
     /* 7) “安全チェック済” */
     let text_after_check = draft;
+    text_after_check = dropWeakClaims(text_after_check);
     text_after_check = forceFacts(text_after_check, lockedMeta);
     text_after_check = enforceCadence(text_after_check, tone);
     text_after_check = cleanFragments(text_after_check);
@@ -588,6 +645,7 @@ export async function POST(req: Request) {
 
       candidate = stripPriceAndSpaces(candidate);
       candidate = neutralizeProperNouns(candidate);
+      candidate = dropWeakClaims(candidate);
       candidate = forceFacts(candidate, lockedMeta);
       candidate = microPunctFix(candidate);
       candidate = enforceCadence(candidate, tone);
