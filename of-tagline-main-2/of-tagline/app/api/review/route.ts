@@ -100,8 +100,10 @@ const RE_FLOOR  = /[0-9０-９]+\s*階部分/gi;
 const RE_UNIT_TERMS = /(角部屋|角住戸|最上階|高層階|低層階|南向き|東向き|西向き|北向き|南東向き|南西向き|北東向き|北西向き)/g;
 const RE_UNIT_FEATURES = /(ウォークインクローゼット|WIC|ウォークインCL|床暖房|浴室乾燥機|食器洗(?:い)?乾燥機|食洗機|ディスポーザー|カウンターキッチン|追い焚き|シューズインクローゼット|SIC)/g;
 const RE_FUTURE_RENOV = /(20[0-9０-９]{2}年(?:[0-9０-９]{1,2}月)?に?リフォーム(?:予定|完了予定)|リノベーション(?:予定|実施予定)|大規模修繕(?:予定|実施予定))/g;
-/* 言い過ぎ（緑豊か等）を安全側で抑制 */
-const RE_OVERGREEN = /(緑豊か|自然が豊か|豊かなランドスケープ|四季折々の風景|潤いある緑|豊かな自然)/g;
+
+/* 言い過ぎ（過度な緑/抽象美辞麗句）は安全側で抑制 */
+const RE_OVERGREEN = /(緑豊か|自然が豊か|豊かなランドスケープ|四季折々の風景|潤いある緑|煌めく水景)/g;
+const RE_OVERCLAIM = /(上質なくらし|格式ある建築美|唯一無二|至高|最高峰|圧倒的|夢のような暮らし)/g;
 
 /* ---------- ニーズ判定 ---------- */
 const needsUnitFix = (issues: CheckIssue[]) =>
@@ -149,24 +151,21 @@ function normalizeStationAndWalkWithLine(text: string, primary?: Route) {
   let t = text || "";
   if (!primary) return normalizeWalk(t);
 
-  // 駅名の素引き → 「駅」表記に揃える
+  // 駅表記統一
   t = t
     .replace(/「[^」]+」駅/g, `「${primary.station}」駅`)
     .replace(new RegExp(`${primary.station}(駅)?(?=から|より|へ|まで)`, "g"), `「${primary.station}」駅`);
 
-  // 「最寄駅から徒歩N分」「代官山から徒歩…」も統一
+  // 「〇〇から徒歩」→「『〇〇』駅から徒歩」
   t = t.replace(/([一-龯ぁ-んァ-ンA-Za-z0-9・ー]+)から徒歩約/g, "「$1」駅から徒歩約");
   t = normalizeWalk(t);
 
-  // 最寄りの一箇所だけを強制固定（路線名含む）
+  // 最寄り1箇所を強制固定（路線名含む）
   const primaryStr = buildPrimaryRoute(primary);
   if (primaryStr) {
     t = t.replace(/「[^」]+」駅から徒歩約[0-9０-９]+分/g, primaryStr);
     t = t.replace(/\b[一-龯ぁ-んァ-ンA-Za-z0-9・ー]+線「[^」]+」駅から徒歩約[0-9０-９]+分/g, primaryStr);
-  }
-  // 二重出力のデデュープ
-  if (primaryStr) {
-    t = t.replace(new RegExp(`(${primaryStr})[。]?\\s*\\1`, "g"), "$1");
+    t = t.replace(new RegExp(`(${primaryStr})[。]?\\s*\\1`, "g"), "$1"); // デデュープ
   }
   return t;
 }
@@ -183,7 +182,7 @@ function neutralizeProperNouns(text: string) {
 
 /* ---------- 句読点・重複の応急修正（増強） ---------- */
 function cleanFragments(text: string): string {
-  return (text || "")
+  let t = (text || "")
     .replace(/(です|ます)(?=交通アクセス|共用|また|さらに)/g, "$1。")
     .replace(/(です|ます)(です|ます)/g, "$1。")
     .replace(/(は、)、/g, "$1")
@@ -205,9 +204,15 @@ function cleanFragments(text: string): string {
     .replace(/\s+駅/g, "駅")
     .replace(/\s{2,}/g, " ")
     .trim();
+
+  // 同一文の重複（数/名詞を含む）を簡易除去
+  t = t.replace(/(総戸数は[0-9０-９]{1,4}戸です。)\s*\1/g, "$1");
+  t = t.replace(/(地上[0-9０-９]{1,3}階(?:建て)?です。)\s*\1/g, "$1");
+  t = t.replace(/(「[^」]+」駅から徒歩約[0-9０-９]{1,2}分。)\s*\1/g, "$1");
+  return t;
 }
 
-/* ---------- Rehouse スクレイピング（路線/駅/徒歩も抽出） ---------- */
+/* ---------- Rehouse スクレイピング（路線/駅/徒歩 等） ---------- */
 type ScrapedMeta = {
   station?: string; walk?: number; structure?: string; floors?: number; units?: number;
   line?: string; routes?: Route[]; address?: string; managerType?: string; builder?: string; builtYmd?: string;
@@ -218,7 +223,7 @@ async function fetchRehouseMeta(url: string): Promise<ScrapedMeta> {
     const html = await res.text();
     const meta: ScrapedMeta = {};
 
-    // 交通（複数行）例: 東急東横線 「代官山」駅 徒歩7分
+    // 交通：東急東横線 「代官山」駅 徒歩7分 等
     const routeRe = /([一-龯ぁ-んァ-ンA-Za-z0-9・ー]+)線[^「\n]*「([^」]+)」駅[^0-9０-９]{0,4}([0-9０-９]{1,2})\s*分/g;
     const routes: Route[] = [];
     for (const m of html.matchAll(routeRe)) {
@@ -233,7 +238,6 @@ async function fetchRehouseMeta(url: string): Promise<ScrapedMeta> {
       meta.walk = routes[0].walk;
       meta.line = routes[0].line;
     } else {
-      // 従来の単発抽出（保険）
       const mStation = html.match(/「([^」]+)」駅/);
       if (mStation) meta.station = mStation[1].trim();
       const mWalk = html.match(/徒歩\s*約?\s*([0-9０-９]{1,2})\s*分/);
@@ -252,7 +256,7 @@ async function fetchRehouseMeta(url: string): Promise<ScrapedMeta> {
     const mFloors = html.match(new RegExp(`地上\\s*([0-9０-９]{1,3})\\s*階`));
     if (mFloors) meta.floors = Number(String(mFloors[1]).replace(/[０-９]/g, s => String("０１２３４５６７８９".indexOf(s))));
 
-    // 住所/管理員/施工（あれば）
+    // 住所/管理員/施工/築年月（あれば）
     const addr = html.match(/所在地[^<]{0,10}([^\n<]{5,60})/);
     if (addr) meta.address = addr[1].trim();
     const manager = html.match(/管理員の勤務形態[^<]{0,10}([^\n<]{2,20})/);
@@ -278,7 +282,6 @@ function maskLockedFacts(text: string, facts: ScrapedMeta): { masked: string; to
   const primaryStr = buildPrimaryRoute(primary);
 
   if (primaryStr) {
-    // 最も強いトークン：路線+駅+徒歩
     t = normalizeStationAndWalkWithLine(t, primary);
     t = t.replace(new RegExp(`${primaryStr}`, "g"), "__ROUTE__");
     tokens.ROUTE = primaryStr;
@@ -325,9 +328,7 @@ function applyLockedFacts(text: string, facts: ScrapedMeta): string {
   const primary: Route | undefined = facts.station && typeof facts.walk === "number" ? { line: facts.line, station: facts.station, walk: facts.walk } : undefined;
   if (primary) {
     const primaryStr = buildPrimaryRoute(primary)!;
-    // 先にすべての最寄り表現を正規化
     t = normalizeStationAndWalkWithLine(t, primary);
-    // さらに「最初の一回」を確実に残す（複数出た場合は1つだけに）
     let used = false;
     t = t.replace(/([一-龯ぁ-んァ-ンA-Za-z0-9・ー]+線)?「[^」]+」駅から徒歩約[0-9０-９]+分/g, () => {
       if (used) return "";
@@ -335,7 +336,6 @@ function applyLockedFacts(text: string, facts: ScrapedMeta): string {
       return primaryStr;
     });
     if (!used) {
-      // 先頭文の末尾に挿入（なければ冒頭）
       const m = t.match(/[^。!?\n]+[。!?\n]/);
       t = m ? t.replace(m[0], m[0].trim() + ` ${primaryStr}。`) : (primaryStr + "。" + t);
     }
@@ -382,7 +382,9 @@ function applyLockedFacts(text: string, facts: ScrapedMeta): string {
     t = t.replace(new RegExp(`地上\\s*[${DIGIT}]{1,3}\\s*階`, "g"), `地上${facts.floors}階`);
   }
 
-  return cleanFragments(normalizeWalk(t));
+  // 重複文の最終掃除
+  t = cleanFragments(normalizeWalk(t));
+  return t;
 }
 
 /* ---------- 最終ガード（二重ロック＋短文化防止） ---------- */
@@ -392,7 +394,6 @@ function forceFacts(text: string, facts: ScrapedMeta, minChars: number): string 
   t = t.replace(/(「[^」]+」駅から徒歩約[0-9０-９]+分)。?\s*\1/g, "$1");
   t = cleanFragments(t);
   if (countJa(t) < Math.max(200, Math.floor(minChars*0.8))) {
-    // 短すぎる時に事実ベースの安全な補助文で底上げ
     const extras: string[] = [];
     if (facts.structure) extras.push(`${facts.structure}の建物です。`);
     if (typeof facts.floors === "number") extras.push(`地上${facts.floors}階建です。`);
@@ -427,12 +428,7 @@ function sanitizeByIssues(text: string, issues: CheckIssue[], applied: string[])
         .replace(/くださいです。/g, "ください。")
         .trim();
 
-      if (!s) {
-        sentences.splice(si, 1);
-        si--;
-      } else {
-        sentences[si] = s;
-      }
+      if (!s) { sentences.splice(si, 1); si--; } else { sentences[si] = s; }
     }
     out = sentences.join("");
     applied.push(`auto_sanitize:${i.id}`);
@@ -440,7 +436,15 @@ function sanitizeByIssues(text: string, issues: CheckIssue[], applied: string[])
   return cleanFragments(out);
 }
 
-/* ---------- 言い換えのための軽いパラフレーズ ---------- */
+/* ---------- ブランド調子（Mitsui）を明示 ---------- */
+const BRAND_STYLE = [
+  "三井不動産の物件紹介として、端正かつ抑制の効いた語り口にする。",
+  "客観的事実を中心に、誇張・断定・過度な形容は避ける（例：唯一無二、圧倒的、四季折々 などは使わない）。",
+  "固有名詞は必要最小限。最寄駅・路線・徒歩分、構造、階数、総戸数、管理体制など核情報を優先。",
+  "文の長短に抑揚をつけ、語尾が連続しないよう配慮する。",
+].join("\n");
+
+/* ---------- 言い換え ---------- */
 async function paraphrase(openai: OpenAI, text: string, tone: string, min: number, max: number) {
   const sys =
     'Return ONLY {"out": string}. (json)\n' +
@@ -448,12 +452,13 @@ async function paraphrase(openai: OpenAI, text: string, tone: string, min: numbe
       "役割: 日本語の不動産コピー編集者。意味は保ちつつ言い回しを自然に分散させる。",
       "禁止: 住戸特定（帖・㎡・間取り・階数・向きなど）/価格・電話番号・外部URLの追加。",
       "表記: 徒歩表現は必ず『徒歩約N分』に正規化する。",
-      "トークン __ROUTE__/__STATION__/__WALK__/__STRUCT__/__UNITS__/__FLOORS__ は文字どおり保持し、改変・削除しない。",
+      "トークン __ROUTE__/__STATION__/__WALK__/__STRUCT__/__UNITS__/__FLOORS__ は文字どおり保持、改変・削除しない。",
+      `ブランド調子:\n${BRAND_STYLE}`,
       "文体: " + tone + "。句読点の欠落や重複助詞は直す。"
     ].join("\n");
   const r = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    temperature: 0.25,
+    temperature: 0.2,
     top_p: 0.9,
     response_format: { type: "json_object" },
     messages: [
@@ -477,13 +482,14 @@ async function polishText(openai: OpenAI, text: string, tone: string, style: str
       "禁止: 事実の新規追加・推測・誇張、住戸特定（帖・㎡・間取り・階数・向き）。",
       "表記: 徒歩は『徒歩約N分』。駅名・徒歩分・総戸数・構造・階数・路線名は入力値（またはトークン）を変更しない。",
       "トークン __ROUTE__/__STATION__/__WALK__/__STRUCT__/__UNITS__/__FLOORS__ は文字どおり保持。",
+      `ブランド調子:\n${BRAND_STYLE}`,
       `トーン:${tone}。文字数:${min}〜${max}（全角）を概ね維持。`,
       `スタイル:\n${style}`,
     ].join("\n");
 
   const r = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    temperature: 0.15,
+    temperature: 0.1,
     top_p: 0.9,
     response_format: { type: "json_object" },
     messages: [
@@ -565,7 +571,7 @@ export async function POST(req: Request) {
       builtYmd: scraped.builtYmd,
     };
 
-    /* 1) テンプレで軽く再構成（未知値は空・安全側） */
+    /* 1) テンプレ構成 + 入力ダイジェスト（安全側） */
     const baseOutline = fillMap(TEMPLATES.outline[Math.abs(seed)%TEMPLATES.outline.length], {
       "【名】": name || "本物件",
       "【駅】": lockedMeta.station || "最寄駅",
@@ -589,18 +595,19 @@ export async function POST(req: Request) {
     let draft = [baseOutline, baseBuilding, baseAccess, baseLife, baseClose].join("");
     if (text && text.length > 50) draft = (draft + " " + text.slice(0, 400)).trim();
 
-    /* 2) 早期サニタイズ（住戸/将来予定/言い過ぎ） */
-    const originalBeforeSanitize = draft;
-    draft = stripPriceAndSpaces(draft);
-    draft = draft.replace(RE_UNIT_TERMS, "");
-    draft = draft.replace(RE_UNIT_FEATURES, "");
-    draft = draft.replace(RE_FUTURE_RENOV, "");
-    draft = draft.replace(RE_OVERGREEN, ""); // 過度な緑アピールを安全側で抑制
+    /* 2) 早期サニタイズ（住戸/将来予定/言い過ぎ/緑誇張/固有名の中立化） */
+    const beforeSanitize = draft;
+    draft = stripPriceAndSpaces(draft)
+      .replace(RE_UNIT_TERMS, "")
+      .replace(RE_UNIT_FEATURES, "")
+      .replace(RE_FUTURE_RENOV, "")
+      .replace(RE_OVERGREEN, "")
+      .replace(RE_OVERCLAIM, "");
     draft = neutralizeProperNouns(draft);
     draft = normalizeWalk(draft);
     draft = microPunctFix(draft);
     draft = cleanFragments(draft);
-    if (draft !== originalBeforeSanitize) applied_fixes.push("early_ng_removed");
+    if (draft !== beforeSanitize) applied_fixes.push("early_ng_removed");
 
     /* 2.5) ルート固定トークン化 */
     const masked1 = maskLockedFacts(draft, lockedMeta);
@@ -669,7 +676,7 @@ export async function POST(req: Request) {
 
       candidate = stripPriceAndSpaces(candidate);
       candidate = neutralizeProperNouns(candidate);
-      candidate = candidate.replace(RE_OVERGREEN, "");
+      candidate = candidate.replace(RE_OVERGREEN, "").replace(RE_OVERCLAIM, "");
       candidate = forceFacts(candidate, lockedMeta, minChars);
       candidate = microPunctFix(candidate);
       candidate = enforceCadence(candidate, tone);
@@ -690,7 +697,7 @@ export async function POST(req: Request) {
     const finalText = text_after_polish || text_after_check;
     const issues_structured_final: CheckIssue[] = checkText(finalText, { scope });
 
-    // “修正なし”誤表示対策：ドラフトとの差分をみて applied_fixes に入れる
+    // “修正なし”誤表示対策
     if (finalText !== text) applied_fixes.push("content_updated");
     if (text_after_polish) applied_fixes.push("polish_applied");
 
@@ -705,7 +712,7 @@ export async function POST(req: Request) {
       auto_fixed,
       polish_applied,
       polish_notes,
-      applied_fixes,                 // ← 修正履歴を必ず返す
+      applied_fixes,
       locked_meta: {
         line: lockedMeta.line,
         station: lockedMeta.station,
