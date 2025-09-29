@@ -2,39 +2,63 @@
 export const runtime = "nodejs";
 
 /**
- * 仕様（簡潔版）
- * - 入力テキストは基本そのまま維持する
- * - 「最寄駅×徒歩」は Rehouse ページから（路線・駅名・徒歩分）を抽出して表記だけ正規化・固定
- * - NGワード/NG表現に該当 “する一文のみ” を句点単位で削除（再構成・言い換えは一切しない）
- * - 構造/総戸数/階数などの事実は変更・補完しない（誤上書き防止）
- * - 何を消したかを removed_sentences に返す
+ * 仕様（簡潔）
+ * - 入力ドラフトは基本そのまま維持
+ * - Rehouse URLから「路線/駅/徒歩」を取得し、本文の最寄駅×徒歩表記だけ正規化・固定
+ * - NGワード/NG表現を含む “その一文だけ” を句点単位で削除（言い換え・再構成はしない）
+ * - 何をどのルールで消したかの詳細を removed_details に返す（左側パネル表示用）
+ * - 構造/総戸数/階数などの事実は変更・補完しない
  */
 
-type NG = RegExp;
+type NG = {
+  id: string;
+  label: string;
+  re: RegExp;
+};
 
-/* ---------- NG パターン（文削除対象） ---------- */
+const DIGIT = "[0-9０-９]";
+
+/* ---------- NGルール（文削除対象） ---------- */
 /** 住戸特定・室内詳細（棟紹介では不可） */
-const RE_UNIT_TERMS: NG = /(角部屋|角住戸|最上階|高層階|低層階|南向き|東向き|西向き|北向き|南東向き|南西向き|北東向き|北西向き)/;
-const RE_TATAMI: NG = /約?\s*[0-9０-９]{1,3}(?:\.\d+)?\s*(帖|畳|Ｊ|J|jo)/i;
-const RE_M2: NG = /約?\s*[0-9０-９]{1,3}(?:\.\d+)?\s*(㎡|m²|m2|平米)/i;
-const RE_LDKSZ: NG = /約?\s*[0-9０-９]{1,3}(?:\.\d+)?\s*(帖|畳)\s*の?\s*[1-5]?(LDK|DK|K|L|S)/i;
-const RE_PLAN: NG = /\b([1-5]\s*LDK|[12]\s*DK|[1-3]\s*K|[1-3]\s*R)\b/i;
-const RE_FLOORPOS: NG = /[0-9０-９]+\s*階部分/;
+const NG_RULES: NG[] = [
+  { id: "unit-direction", label: "住戸の向き・位置特定", re: /(角部屋|角住戸|最上階|高層階|低層階|南向き|東向き|西向き|北向き|南東向き|南西向き|北東向き|北西向き)/ },
+  { id: "unit-tatami", label: "帖・畳などの室内寸法", re: /約?\s*[0-9０-９]{1,3}(?:\.\d+)?\s*(帖|畳|Ｊ|J|jo)/i },
+  { id: "unit-m2", label: "㎡・平米などの室内面積", re: /約?\s*[0-9０-９]{1,3}(?:\.\d+)?\s*(㎡|m²|m2|平米)/i },
+  { id: "unit-ldk-size", label: "帖数＋LDKの室内詳細", re: /約?\s*[0-9０-９]{1,3}(?:\.\d+)?\s*(帖|畳)\s*の?\s*[1-5]?(LDK|DK|K|L|S)/i },
+  { id: "unit-plan", label: "間取りの直接言及", re: /\b([1-5]\s*LDK|[12]\s*DK|[1-3]\s*K|[1-3]\s*R)\b/i },
+  { id: "unit-floorpos", label: "○階部分など階位置", re: /[0-9０-９]+\s*階部分/ },
 
-/** 将来断定・予定・保証/誇大（安全側で削除） */
-const RE_FUTURE_RENOV: NG = /(20[0-9０-９]{2}年(?:[0-9０-９]{1,2}月)?に?リフォーム(予定|完了予定)|リノベーション(予定|実施予定)|大規模修繕(予定|実施予定))/;
-const RE_GUARANTEE: NG = /(必ず|間違いなく|保証|100%|満足する(?:事|こと)?でしょう|誰もが満足|絶対に|必至)/;
+  /** 将来断定・予定（広めに網羅：予定／予定されている／行われる予定 等） */
+  {
+    id: "future-renov",
+    label: "リフォーム/リノベ/修繕の予定・断定",
+    re:
+      /(?:20[0-9０-９]{2}年(?:[0-9０-９]{1,2}月)?に?(?:リフォーム|リノベーション|大規模修繕)(?:予定|完了予定|実施予定)?)|
+       (?:リフォーム(?:を|が)?(?:行われ|おこなわ|行なわ|実施)れる?予定)|
+       (?:リフォーム(?:が)?予定され(?:ている|ており|ています|ておりました)?)|
+       (?:リノベーション(?:を|が)?予定|リノベーションが予定され(?:ている|ており|ています)?)|
+       (?:大規模修繕(?:を|が)?予定|大規模修繕が予定され(?:ている|ており|ています)?)/
+      .source.replace(/\s+/g, "")
+      ? new RegExp(
+          /(?:20[0-9０-９]{2}年(?:[0-9０-９]{1,2}月)?に?(?:リフォーム|リノベーション|大規模修繕)(?:予定|完了予定|実施予定)?)|
+           (?:リフォーム(?:を|が)?(?:行われ|おこなわ|行なわ|実施)れる?予定)|
+           (?:リフォーム(?:が)?予定され(?:ている|ており|ています|ておりました)?)|
+           (?:リノベーション(?:を|が)?予定|リノベーションが予定され(?:ている|ており|ています)?)|
+           (?:大規模修繕(?:を|が)?予定|大規模修繕が予定され(?:ている|ており|ています)?)/
+            .source.replace(/\s+/g, ""),
+          "i"
+        )
+      : /$^/i,
+  },
 
-/** 店名/学校名など固有施設の具体名は “名称言及” 自体は許容だが、念のため過剰宣伝ワードで削る */
-const RE_HYPE: NG = /(最高峰|唯一無二|比類なき|圧倒的|完璧)/;
+  /** 保証・過度断定（満足するでしょう 等） */
+  { id: "guarantee", label: "保証・断定表現", re: /(必ず|間違いなく|保証|100%|誰もが満足|満足する(?:事|こと)?でしょう|絶対に|必至)/ },
 
-/** この配列に含まれるどれかにマッチした文だけ削除 */
-const NG_SENTENCE_PATTERNS: NG[] = [
-  RE_UNIT_TERMS, RE_TATAMI, RE_M2, RE_LDKSZ, RE_PLAN, RE_FLOORPOS,
-  RE_FUTURE_RENOV, RE_GUARANTEE, RE_HYPE,
+  /** 過剰誇張（宣伝ワード） */
+  { id: "hype", label: "過剰な誇張表現", re: /(最高峰|唯一無二|比類なき|圧倒的|完璧)/ },
 ];
 
-/* ---------- テキストユーティリティ ---------- */
+/* ---------- 文字・整形ユーティリティ ---------- */
 const JA_SENT_SPLIT = /(?<=[。！？\?])\s*(?=[^\s])/g;
 const splitSentencesJa = (t: string) =>
   (t || "")
@@ -144,19 +168,30 @@ function unmaskSTWALK(text: string, tokens: LockTokens): string {
   return t;
 }
 
-/* ---------- NG 一文削除 ---------- */
+/* ---------- NG 一文削除（理由つき） ---------- */
 function deleteSentencesByNG(text: string) {
   const sentences = splitSentencesJa(text);
   const kept: string[] = [];
   const removed: string[] = [];
+  const details: Array<{ sentence: string; hits: Array<{ id: string; label: string; excerpt: string }> }> = [];
 
   sentences.forEach(s => {
-    const hit = NG_SENTENCE_PATTERNS.some(re => re.test(s));
-    if (hit) removed.push(s);
-    else kept.push(s);
+    const hits = NG_RULES
+      .map(rule => {
+        const m = s.match(rule.re);
+        return m ? { id: rule.id, label: rule.label, excerpt: m[0] } : null;
+      })
+      .filter(Boolean) as Array<{ id: string; label: string; excerpt: string }>;
+
+    if (hits.length) {
+      removed.push(s);
+      details.push({ sentence: s, hits });
+    } else {
+      kept.push(s);
+    }
   });
 
-  return { cleaned: joinSentences(kept), removed };
+  return { cleaned: joinSentences(kept), removed, details };
 }
 
 /* ---------- handler ---------- */
@@ -166,7 +201,7 @@ export async function POST(req: Request) {
     const {
       text = "",
       url = "",
-      maxChars = 10000, // カットは基本しない（元文維持のため）
+      maxChars = 10000, // 元文維持のため基本ノーカット
     } = body || {};
 
     if (!text) {
@@ -179,21 +214,21 @@ export async function POST(req: Request) {
       scraped = await fetchRehouseMeta(url);
     }
 
-    // 2) 最寄駅×徒歩の表記だけ固定（本文の他要素はいじらない）
+    // 2) 最寄駅×徒歩の表記だけ固定（本文の他要素は触らない）
     const { masked, tokens } = maskSTWALK(text, scraped);
     let working = unmaskSTWALK(masked, tokens);
     working = normalizeWalk(working);
 
-    // 3) NG ワード/表現を含む “その一文だけ” を削除
-    const { cleaned, removed } = deleteSentencesByNG(working);
+    // 3) NGワード/表現を含む “その一文だけ” を削除（理由ログ付き）
+    const { cleaned, removed, details } = deleteSentencesByNG(working);
 
-    // 4) 軽い整形（句読点ひずみのみ）。再構成はしない
+    // 4) 軽い体裁整え。再構成はしない
     let out = microClean(cleaned);
     if (Array.from(out).length > maxChars) {
       out = Array.from(out).slice(0, maxChars).join("").trim();
     }
 
-    // 念のため STWALK の重複掃除
+    // 念のため STWALK の多重出力を掃除
     if (tokens.STWALK) {
       const esc = tokens.STWALK.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       out = out.replace(new RegExp(`(?:${esc})(?:。?\\s*${esc})+`, "g"), tokens.STWALK);
@@ -201,9 +236,10 @@ export async function POST(req: Request) {
 
     return new Response(JSON.stringify({
       ok: true,
-      improved: out,               // これを「安全チェック済 / 自動修正適用」として表示
-      removed_sentences: removed,  // 消した一文のログ（UIで理由表示に使える）
-      locked_stwalk: tokens.STWALK // 固定後の最寄駅×徒歩
+      improved: out,                 // これを「安全チェック済 / 自動修正適用」として表示
+      removed_sentences: removed,    // 消した一文テキスト
+      removed_details: details,      // {sentence, hits:[{id,label,excerpt}]} の配列（左側表示用）
+      locked_stwalk: tokens.STWALK,  // 固定後の最寄駅×徒歩
     }), { status: 200, headers: { "content-type": "application/json" } });
 
   } catch (e: any) {
