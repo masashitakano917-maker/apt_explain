@@ -110,6 +110,14 @@ const RE_UNIT_FEATURES = /(ウォークインクローゼット|WIC|ウォーク
 /* 将来断定/リフォーム予定の表現を安全側で中立化/除去 */
 const RE_FUTURE_RENOV = /(20[0-9０-９]{2}年(?:[0-9０-９]{1,2}月)?に?リフォーム(?:予定|完了予定)|リノベーション(?:予定|実施予定)|大規模修繕(?:予定|実施予定))/g;
 
+/* “緑豊か/豊かな緑/自然に囲まれ”等の過剰誇張を弱める（都心誤爆対策の軽い中立化） */
+function softenOverclaims(text: string) {
+  return (text || "")
+    .replace(/緑豊か[な]?/g, "緑のある")
+    .replace(/自然に?囲まれ[たて]?/g, "落ち着いた街並みに")
+    .replace(/豊かな自然/g, "身近な緑");
+}
+
 /* ---------- ニーズ判定 ---------- */
 const needsUnitFix = (issues: CheckIssue[]) =>
   issues.some(i =>
@@ -251,8 +259,8 @@ type LockTokens = {
   STRUCT?: string;
   UNITS?: string;
   FLOORS?: string;
-  STATION?: string; // 駅名単体（互換）
-  WALK?: string;    // 徒歩約N分単体（互換）
+  STATION?: string; // 互換用
+  WALK?: string;    // 互換用
 };
 
 function maskLockedFacts(text: string, facts: ScrapedMeta): { masked: string; tokens: LockTokens } {
@@ -313,11 +321,11 @@ function unmaskLockedFacts(text: string, tokens: LockTokens): string {
 function applyLockedFacts(text: string, facts: ScrapedMeta): string {
   let t = text || "";
 
-  // 最優先：駅+路線+徒歩 の強制上書き（既存の多様表現をすべてトークンに差し替え→復元）
+  // 最優先：駅+路線+徒歩 の強制上書き
   const { masked, tokens } = maskLockedFacts(t, facts);
   t = unmaskLockedFacts(masked, tokens);
 
-  // 構造（後で canonicalize でも調整）
+  // 構造
   if (facts.structure) {
     t = t
       .replace(/鉄骨鉄筋コンクリート造|鉄筋コンクリート造/g, facts.structure)
@@ -370,44 +378,9 @@ function forceFacts(text: string, facts: ScrapedMeta): string {
   const stwalk = buildStationWalkString({ line: facts.line, station: facts.station, walk: facts.walk });
   const esc = stwalk.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   t = t.replace(new RegExp(`(?:${esc})(?:。?\\s*${esc})+`, "g"), stwalk);
-  // 「◯◯から徒歩…」等の残骸掃除
+  // 「代官山から徒歩…」等の残骸掃除
   t = t.replace(/([一-龯ぁ-んァ-ンA-Za-z0-9・\s]+)?代官山\s*駅?\s*から?\s*徒歩約[0-9０-９]{1,2}分/g, stwalk);
   return cleanFragments(t);
-}
-
-/* ---------- 追加：構造・総戸数の正規化ガード ---------- */
-function canonicalizeUnits(text: string, units?: number) {
-  let t = text || "";
-  // 既存の「総戸数…戸」をすべて除去（文全体/括弧内/読点内のパターン）
-  t = t
-    .replace(/総戸数[:：]?\s*[0-9０-９]{1,4}\s*戸(?:です|だ)?。?/g, "")
-    .replace(/(、|,|\(|（)\s*総戸数[:：]?\s*[0-9０-９]{1,4}\s*戸[^、,（）)]*(、|,|\)|）)?/g, "")
-    .replace(/総戸数[^。]*?[0-9０-９]{1,4}\s*戸[^。]*。?/g, "");
-  if (typeof units === "number") {
-    const inject = `総戸数は${units}戸です。`;
-    if (!t.includes(inject)) {
-      const sentenceEnd = t.match(/[^。]*。/);
-      if (sentenceEnd) t = t.replace(sentenceEnd[0], sentenceEnd[0] + " " + inject);
-      else t += inject;
-    }
-    const esc = inject.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    t = t.replace(new RegExp(`(?:${esc})(?:\\s*${esc})+`, "g"), inject);
-  }
-  return t;
-}
-
-function normalizeStructureByFacts(text: string, structure?: string) {
-  let t = text || "";
-  if (!structure) {
-    // 事実が無い時は構造に言及する文/句自体を落とす（安全側）
-    return t
-      .replace(/[^。]*(鉄骨鉄筋コンクリート|鉄筋コンクリート|SRC|RC)[^。]*。/g, "")
-      .replace(/(、|,|\(|（)[^。]*?(鉄骨鉄筋コンクリート|鉄筋コンクリート|SRC|RC)[^。]*?(、|,|\)|）)/g, "");
-  }
-  t = t.replace(/\bSRC\b/gi, "__STRUCT__")
-       .replace(/\bRC\b/gi, "__STRUCT__")
-       .replace(/鉄骨鉄筋コンクリート造|鉄筋コンクリート造/g, "__STRUCT__");
-  return t.replace(/__STRUCT__/g, structure);
 }
 
 /* ---------- NG の文単位サニタイズ ---------- */
@@ -439,7 +412,7 @@ function sanitizeByIssues(text: string, issues: CheckIssue[]): string {
         sentences.splice(si, 1);
         si--;
       } else {
-        sentences[i] = s;
+        sentences[si] = s;
       }
     }
     out = sentences.join("");
@@ -594,17 +567,14 @@ export async function POST(req: Request) {
 
     /* 2) サニタイズ & 正規化（早期に住戸/将来予定を落とす） */
     improved = stripPriceAndSpaces(improved);
-    improved = improved.replace(RE_UNIT_TERMS, "");
+    improved = improved.replace(RE_UNIT_TERMS, "");           // 住戸特定ワードは早期に全削除
     improved = improved.replace(RE_UNIT_FEATURES, "");
     improved = improved.replace(RE_FUTURE_RENOV, "");
     improved = neutralizeProperNouns(improved);
+    improved = softenOverclaims(improved);
     improved = normalizeWalk(improved);
     improved = microPunctFix(improved);
     improved = cleanFragments(improved);
-
-    // ここで構造/戸数の初期正規化
-    improved = normalizeStructureByFacts(improved, lockedMeta.structure);
-    improved = canonicalizeUnits(improved, lockedMeta.units);
 
     /* ★ プレースホルダ固定（STWALK/STRUCT/UNITS/FLOORS） */
     const masked1 = maskLockedFacts(improved, lockedMeta);
@@ -617,10 +587,6 @@ export async function POST(req: Request) {
     draft = applyLockedFacts(draft, lockedMeta);
     draft = microPunctFix(draft);
     draft = cleanFragments(draft);
-
-    // 再度：構造/戸数の正規化
-    draft = normalizeStructureByFacts(draft, lockedMeta.structure);
-    draft = canonicalizeUnits(draft, lockedMeta.units);
 
     /* 4) リズム & 句読点 */
     draft = enforceCadence(draft, tone);
@@ -646,26 +612,21 @@ export async function POST(req: Request) {
         .replace(RE_UNIT_TERMS, "")
         .replace(RE_UNIT_FEATURES, "");
       draft = microPunctFix(draft);
-      draft = cleanFragments(draft);
     }
 
-    // 再チェック（一般NG）
+    // 再チェックし、住戸以外のNGを文単位で除去
     issues_structured_before = checkText(draft, { scope });
     if (issues_structured_before.some(i => !i.id.startsWith("unit-"))) {
       auto_fixed = true;
       draft = sanitizeByIssues(draft, issues_structured_before.filter(i => !i.id.startsWith("unit-")));
     }
 
-    // 事実最終固定＋正規化
+    // 事実の最終固定（駅×路線×徒歩・構造・総戸数・階数）
     draft = forceFacts(draft, lockedMeta);
-    draft = normalizeStructureByFacts(draft, lockedMeta.structure);
-    draft = canonicalizeUnits(draft, lockedMeta.units);
 
     /* 7) “安全チェック済” */
     let text_after_check = draft;
     text_after_check = forceFacts(text_after_check, lockedMeta);
-    text_after_check = normalizeStructureByFacts(text_after_check, lockedMeta.structure);
-    text_after_check = canonicalizeUnits(text_after_check, lockedMeta.units);
     text_after_check = enforceCadence(text_after_check, tone);
     text_after_check = cleanFragments(text_after_check);
     if (countJa(text_after_check) > maxChars) text_after_check = hardCapJa(text_after_check, maxChars);
@@ -682,9 +643,8 @@ export async function POST(req: Request) {
 
       candidate = stripPriceAndSpaces(candidate);
       candidate = neutralizeProperNouns(candidate);
+      candidate = softenOverclaims(candidate);
       candidate = forceFacts(candidate, lockedMeta);
-      candidate = normalizeStructureByFacts(candidate, lockedMeta.structure);
-      candidate = canonicalizeUnits(candidate, lockedMeta.units);
       candidate = microPunctFix(candidate);
       candidate = enforceCadence(candidate, tone);
       candidate = cleanFragments(candidate);
@@ -699,12 +659,11 @@ export async function POST(req: Request) {
     }
 
     /* 9) 最終チェック */
-    const finalText = text_after_polish || text_after_check;
-    const issues_structured_final: CheckIssue[] = checkText(finalText, { scope });
+    const issues_structured_final: CheckIssue[] = checkText(text_after_polish || text_after_check, { scope });
 
     return new Response(JSON.stringify({
       ok: true,
-      improved: finalText,
+      improved: text_after_polish || text_after_check,
       text_after_check,
       text_after_polish,
       issues_before: issues_before.length ? issues_before : undefined,
