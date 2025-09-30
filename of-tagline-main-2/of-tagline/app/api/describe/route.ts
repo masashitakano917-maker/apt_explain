@@ -1,10 +1,7 @@
-// app/api/describe/route.ts
 export const runtime = "nodejs";
-
 import OpenAI from "openai";
 
-/* ======================== 基本ユーティリティ ======================== */
-
+/* ---------- small utils ---------- */
 function htmlToText(html: string) {
   return (html || "")
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -14,7 +11,6 @@ function htmlToText(html: string) {
     .replace(/\s+/g, " ")
     .trim();
 }
-
 const countJa = (s: string) => Array.from(s || "").length;
 
 /** 文末をできるだけ保ちながら max 文字以内にカット（句点優先） */
@@ -38,159 +34,192 @@ const normMustWords = (src: unknown): string[] => {
 
 /** 価格・金額表現を除去（保険）＋余分な空白整理 */
 const stripPriceAndSpaces = (s: string) =>
-  String(s || "")
+  (s || "")
     .replace(/(価格|金額|[一二三四五六七八九十百千万億兆\d０-９,，\.]+(?:億|万)?円)/g, "")
     .replace(/\s{2,}/g, " ")
     .trim();
 
-/** BANワードの除去（保険） */
+/** BANワードの除去（保険） ── ※ロック用トークンは壊さない */
 const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const stripWords = (s: string, words: string[]) =>
-  String(s || "").replace(new RegExp(`(${words.map(esc).join("|")})`, "g"), "");
+const stripWords = (s: string, words: string[]) => {
+  const SAFE = /__(STWALK|UNITS|STRUCT|FLOORS|BUILT|DEV|BUILDER|MGR)__/
+  return (s || "").replace(new RegExp(`(?!${SAFE.source})(${words.map(esc).join("|")})`, "g"), "");
+};
 
-/* ======================== スタイル/トーン ======================== */
+/* ---------- BAN（誇張・勧誘に繋がる語） ---------- */
+const BANNED = [
+  "完全","完ぺき","絶対","万全","100％","フルリフォーム","理想","日本一","日本初","業界一","超","当社だけ","他に類を見ない",
+  "抜群","一流","秀逸","羨望","屈指","特選","厳選","正統","由緒正しい","地域でナンバーワン","最高","最高級","極","特級","最新",
+  "最適","至便","至近","一級","絶好","買得","掘出","土地値","格安","投売り","破格","特安","激安","安値","バーゲンセール",
+  "ディズニー","ユニバーサルスタジオ",
+  "お問い合わせ","お問合せ","お気軽に","ぜひ一度ご覧","ご連絡ください","見学予約","内見"
+];
 
-function styleGuide(tone: string): string {
+/* ---------- トーン正規化 ---------- */
+type Tone = "上品・落ち着いた" | "一般的" | "親しみやすい";
+function normalizeTone(t: any): Tone {
+  const v = String(t || "").trim();
+  if (v === "親しみやすい") return "親しみやすい";
+  if (v === "一般的") return "一般的";
+  return "上品・落ち着いた";
+}
+
+/* ---------- STYLE PRESETS ---------- */
+function styleGuide(toneInput: any): string {
+  const tone = normalizeTone(toneInput);
   if (tone === "親しみやすい") {
     return [
-      "文体: 親しみやすく、やわらかい丁寧語。誇張は抑制。",
-      "構成: ①立地・雰囲気 ②敷地/外観 ③アクセス ④共用/サービス ⑤結び。",
-      "文長: 30〜60字中心。文末は「です/ます」。"
+      "文体: 親しみやすく、やわらかい丁寧語。誇張・絵文字・感嘆記号は抑制。",
+      "構成: ①立地・雰囲気 ②敷地/外観の印象 ③アクセス ④共用/サービス ⑤日常シーンを想起させる結び。",
+      "語彙例: 「〜がうれしい」「〜を感じられます」「〜にも便利」「〜に寄り添う」。",
+      "文長: 30〜60字中心。",
+      "文末は「です」「ます」で統一。不自然な文法は禁止。"
     ].join("\n");
   }
   if (tone === "一般的") {
     return [
       "文体: 中立・説明的で読みやすい丁寧語。事実ベースで誇張を避ける。",
       "構成: ①全体概要 ②規模/デザイン ③アクセス ④共用/管理 ⑤まとめ。",
-      "文長: 40〜70字中心。文末は「です/ます」。"
+      "語彙例: 「〜に位置」「〜を採用」「〜が整う」「〜を提供」。",
+      "文長: 40〜70字中心。",
+      "文末は「です」「ます」で統一。不自然な文法は禁止。"
     ].join("\n");
   }
-  // 上品・落ち着いた（デフォルト）
   return [
-    "文体: 上品で落ち着いた丁寧語。過度な比喩・感嘆記号は避ける。",
-    "構成: ①立地・環境 ②ランドスケープ ③建築/デザイン ④アクセス ⑤共用/サービス ⑥結び。",
-    "体言止めは最大2文まで。文末は「です/ます」。"
+    "文体: 上品・落ち着いた・事実ベース。過度な誇張や感嘆記号は避ける。",
+    "構成: ①全体コンセプト/立地 ②敷地規模・ランドスケープ ③建築/デザイン ④交通アクセス ⑤共用/サービス ⑥結び。",
+    "語彙例: 「〜という全体コンセプトのもと」「〜を実現」「〜に相応しい」「〜がひろがる」「〜を提供します」。",
+    "文長: 40〜70字中心。体言止めは1〜2文に留める。",
+    "文末は「です」「ます」で統一。不自然な文法は禁止。"
   ].join("\n");
 }
 
-/* ======================== クリーニング系 ======================== */
-
-const JA_SENT_SPLIT = /(?<=[。！？\?])\s*(?=[^\s])/g;
-const splitSentencesJa = (t: string) =>
-  (t || "").replace(/\s+\n/g, "\n").trim().split(JA_SENT_SPLIT).map(s => s.trim()).filter(Boolean);
-
-function microClean(text: string) {
-  let t = String(text || "");
-
-  // 見出し残骸の除去（「立地：」「設備・」など）
-  t = t.replace(
-    /(^|\n)(立地|建物|設備|周辺|アクセス|特徴|概要|ポイント)\s*(?:[・:：\-、。]\s*)?(?=\n|$)/g,
-    "$1"
-  );
-  t = t.replace(
-    /(^|(?<=。)|(?<=！)|(?<=？)|(?<=\?))\s*(立地|建物|設備|周辺|アクセス|特徴|概要|ポイント)\s*(?:[・:：\-、。]\s*)/g,
-    "$1"
-  );
-
-  // 句読点・空白の応急修正
-  t = t
-    .replace(/(です|ます)(?=交通アクセス|共用|また|さらに)/g, "$1。")
-    .replace(/(です|ます)(です|ます)/g, "$1。")
-    .replace(/、、+/g, "、")
-    .replace(/。。+/g, "。")
-    .replace(/。\s*です。/g, "です。")
-    .replace(/くださいです。/g, "ください。")
-    .replace(/ですです/g, "です")
-    .replace(/，/g, "、").replace(/．/g, "。")
-    .replace(/\s+」/g, "」").replace(/「\s+/g, "「")
-    .replace(/\s+駅/g, "駅")
-    .replace(/\s{2,}/g, " ")
-    .replace(/\n{2,}/g, "\n")
-    .trim();
-
-  return t;
-}
-
-/** “徒歩約N分” に統一（捏造はしない、見つかった表現だけ正規化） */
+/* ---------- 駅・徒歩の表記統一 ---------- */
 function normalizeWalk(text: string) {
   let t = (text || "");
-  t = t.replace(/徒歩\s*([0-9０-９]+)\s*分/g, "徒歩約$1分");
-  t = t.replace(/(徒歩約)\s*(?:徒歩約\s*)+/g, "$1");
+  t = t.replace(/徒歩\s*([0-9０-９]{1,2})\s*分/g, "徒歩約$1分");
   t = t.replace(/駅から\s+徒歩約/g, "駅から徒歩約");
   return t;
 }
+type StationWalk = { line?: string; station?: string; walk?: number };
+function buildStationWalkString(sw: StationWalk) {
+  const st = sw.station ? `「${sw.station}」駅` : "最寄駅";
+  const ln = sw.line ? (sw.line.endsWith("線") ? sw.line : `${sw.line}線`) : "";
+  const head = ln ? `${ln}${st}` : st;
+  const wk = typeof sw.walk === "number" ? `から徒歩約${sw.walk}分` : "から徒歩約10分";
+  return `${head}${wk}`;
+}
+const toHalf = (s: string) => String(s || "").replace(/[０-９]/g, d => String("０１２３４５６７８９".indexOf(d)));
 
-/* ======================== NG・削除ロジック ======================== */
+/* ---------- 物件ページから正規抽出 ---------- */
+type ScrapedMeta = {
+  line?: string;
+  station?: string;
+  walk?: number;
+  units?: number;
+  structure?: string;
+  floors?: number;
+  built?: string;     // 1984年10月築 などそのまま
+  dev?: string;       // 分譲会社
+  builder?: string;   // 施工会社
+  mgr?: string;       // 管理会社
+};
+function scrapeMeta(html: string): ScrapedMeta {
+  const t = htmlToText(html);
+  const m: ScrapedMeta = {};
 
-const DIGIT = "[0-9０-９]";
-
-/** 誇張・うたい文句（保険） */
-const BANNED = [
-  "完全","完ぺき","絶対","万全","100％","フルリフォーム","理想","日本一","日本初","業界一","超","当社だけ","他に類を見ない",
-  "抜群","一流","秀逸","羨望","屈指","特選","厳選","正統","由緒正しい","地域でナンバーワン","最高","最高級","極","特級","最新",
-  "最適","至便","至近","一級","絶好","買得","掘出","土地値","格安","投売り","破格","特安","激安","安値","バーゲンセール",
-  "ディズニー","ユニバーサルスタジオ",
-  "歴史ある","歴史的","歴史的建造物","由緒ある"
-];
-
-/** 棟紹介で禁止する “住戸特定・面積・間取り・向き・階部分・設備名” */
-const RE_UNIT_TERMS = /(角部屋|角住戸|最上階|高層階|低層階|南向き|東向き|西向き|北向き|南東向き|南西向き|北東向き|北西向き)/;
-const RE_TATAMI      = /約?\s*[0-9０-９]{1,3}(?:\.\d+)?\s*(帖|畳|Ｊ|J|jo)/;
-const RE_M2          = /約?\s*[0-9０-９]{1,3}(?:\.\d+)?\s*(㎡|m²|m2|平米)/;
-const RE_LDKSZ       = /約?\s*[0-9０-９]{1,3}(?:\.\d+)?\s*(帖|畳)\s*の?\s*[1-5]?(LDK|DK|K|L|S)/;
-const RE_PLAN        = /\b([1-5]\s*LDK|[12]\s*DK|[1-3]\s*K|[1-3]\s*R)\b/;
-const RE_FLOORPART   = new RegExp(`[${DIGIT}]+\\s*階部分`);
-const RE_UNIT_FEATURES =
-  /(ウォークインクローゼット|WIC|ウォークインCL|床暖房|浴室乾燥機|食器洗(?:い)?乾燥機|食洗機|ディスポーザー|カウンターキッチン|追い焚き|シューズインクローゼット|SIC)/;
-
-/** 将来予定・断定（リフォーム/リノベ/修繕）— 文字列→RegExp で安全に */
-const RE_FUTURE_RENOV = new RegExp(
-  [
-    "(?:20[0-9０-９]{2}年(?:[0-9０-９]{1,2}月)?に?(?:リフォーム|リノベーション|大規模修繕)(?:予定|完了予定|実施予定)?)",
-    "(?:リフォーム(?:を|が)?(?:行われ|おこなわ|行なわ|実施)れる?予定)",
-    "(?:リフォーム(?:が)?予定され(?:ている|ており|ています|ておりました)?)",
-    "(?:リノベーション(?:を|が)?予定|リノベーションが予定され(?:ている|ており|ています)?)"
-  ].join("|")
-);
-
-/** “数値/構造/築年” の断定（捏造を防ぐためドラフトでは禁止） */
-const RE_NUMERIC_FACTS = new RegExp(
-  [
-    `総戸数\\s*[${DIGIT}]{1,4}\\s*戸`,
-    `地上\\s*[${DIGIT}]{1,3}\\s*階`,
-    `地下\\s*[${DIGIT}]{1,3}\\s*階`,
-    `築\\s*[${DIGIT}]{1,4}\\s*年`,
-    `19[5-9][0-9]年|20[0-4][0-9]年`,            // 年号（ざっくり）
-    `鉄筋コンクリート造|鉄骨鉄筋コンクリート造|SRC|RC`
-  ].join("|")
-);
-
-/** 文単位フィルタ：NGがあれば “その文を丸ごと捨てる” */
-function dropNgSentences(draft: string): string {
-  const sentences = splitSentencesJa(draft);
-  const out: string[] = [];
-  for (const s of sentences) {
-    const hasNG =
-      RE_UNIT_TERMS.test(s) ||
-      RE_TATAMI.test(s) ||
-      RE_M2.test(s) ||
-      RE_LDKSZ.test(s) ||
-      RE_PLAN.test(s) ||
-      RE_FLOORPART.test(s) ||
-      RE_UNIT_FEATURES.test(s) ||
-      RE_FUTURE_RENOV.test(s) ||
-      RE_NUMERIC_FACTS.test(s);
-    if (!hasNG) out.push(s);
+  // 交通例: 都営三田線 新板橋 徒歩10分 / 都営三田線「新板橋」駅 徒歩10分
+  const mLS = t.match(/([一-龯ぁ-んァ-ンA-Za-z0-9・\s]{1,20})?線?「?([一-龯ぁ-んァ-ンA-Za-z0-9・]+)」?\s*駅?\s*徒歩\s*約?\s*([0-9０-９]{1,2})\s*分/);
+  if (mLS) {
+    m.line = (mLS[1] || "").trim() ? ((mLS[1] || "").trim().replace(/線?$/, "線")) : undefined;
+    m.station = (mLS[2] || "").trim();
+    m.walk = Number(toHalf(mLS[3]));
   }
-  return out.join("");
+
+  const mu = t.match(/総戸数[^0-9０-９]{0,6}([0-9０-９]{1,4})\s*戸/);
+  if (mu) m.units = Number(toHalf(mu[1]));
+
+  // 構造
+  if (/(鉄骨鉄筋コンクリート|SRC)/.test(t)) m.structure = "鉄骨鉄筋コンクリート造";
+  else if (/(鉄筋コンクリート|RC)/.test(t)) m.structure = "鉄筋コンクリート造";
+
+  const mf = t.match(/地上\s*([0-9０-９]{1,3})\s*階/);
+  if (mf) m.floors = Number(toHalf(mf[1]));
+
+  const mb = t.match(/(19[5-9][0-9]|20[0-4][0-9])年(?:[0-9０-９]{1,2}月)?(?:築|建築|新築)/);
+  if (mb) m.built = mb[0].replace(/０-９/g, toHalf);
+
+  const mdev = t.match(/分譲会社[:：]?\s*([^\s　]+(?:株式会社|（株）)?)/) || t.match(/分譲[:：]?\s*([^\s　]+(?:株式会社|（株）)?)/);
+  if (mdev) m.dev = mdev[1];
+
+  const mbld = t.match(/施工会社[:：]?\s*([^\s　]+(?:株式会社|（株）)?)/) || t.match(/施工[:：]?\s*([^\s　]+(?:株式会社|（株）)?)/);
+  if (mbld) m.builder = mbld[1];
+
+  const mmgr = t.match(/管理会社[:：]?\s*([^\s　]+(?:株式会社|（株）)?)/) || t.match(/管理(?:会社)?\s*[:：]?\s*([^\s　]+(?:株式会社|（株）)?)/);
+  if (mmgr) m.mgr = mmgr[1];
+
+  return m;
 }
 
-/* ======================== 文字数調整/校正 ======================== */
+/* ---------- ロック: マスク/復元/適用 ---------- */
+type LockTokens = {
+  STWALK?: string; UNITS?: string; STRUCT?: string; FLOORS?: string; BUILT?: string; DEV?: string; BUILDER?: string; MGR?: string;
+};
+function maskFacts(text: string, facts: ScrapedMeta): { masked: string; tokens: LockTokens } {
+  let t = normalizeWalk(text || "");
+  const tokens: LockTokens = {};
 
+  // 作成
+  const stwalk = buildStationWalkString({ line: facts.line, station: facts.station, walk: facts.walk });
+  tokens.STWALK = stwalk;
+  tokens.UNITS  = typeof facts.units === "number" ? `${facts.units}戸` : undefined;
+  tokens.STRUCT = facts.structure;
+  tokens.FLOORS = typeof facts.floors === "number" ? `地上${facts.floors}階` : undefined;
+  tokens.BUILT  = facts.built;
+  tokens.DEV    = facts.dev;
+  tokens.BUILDER= facts.builder;
+  tokens.MGR    = facts.mgr;
+
+  // 置換
+  t = t
+    .replace(/([一-龯ぁ-んァ-ンA-Za-z0-9・\s]{1,20})?線?「[^」]+」駅\s*(?:から)?\s*徒歩約?\s*[0-9０-９]{1,2}\s*分/g, "__STWALK__")
+    .replace(/「[^」]+」駅\s*(?:から)?\s*徒歩約?\s*[0-9０-９]{1,2}\s*分/g, "__STWALK__");
+  if (facts.structure) t = t.replace(/鉄骨鉄筋コンクリート造|鉄筋コンクリート造|\bSRC\b|\bRC\b/g, "__STRUCT__");
+  if (typeof facts.units === "number") {
+    t = t.replace(/総戸数[^。]*?[0-9０-９]{1,4}\s*戸/g, m => m.replace(/[0-9０-９]{1,4}\s*戸/, "__UNITS__"));
+    t = t.replace(/総戸数は?\s*[0-9０-９]{1,4}\s*戸/g, "総戸数は__UNITS__");
+  }
+  if (typeof facts.floors === "number") t = t.replace(/地上\s*[0-9０-９]{1,3}\s*階/g, "__FLOORS__");
+  if (facts.built) t = t.replace(/(19[5-9][0-9]|20[0-4][0-9])年(?:[0-9０-９]{1,2}月)?(?:築|建築|新築)/g, "__BUILT__");
+  if (facts.dev) t = t.replace(/分譲会社[:：]?[^\s　。.]+/g, "分譲会社__DEV__");
+  if (facts.builder) t = t.replace(/施工会社[:：]?[^\s　。.]+/g, "施工会社__BUILDER__");
+  if (facts.mgr) t = t.replace(/管理会社[:：]?[^\s　。.]+/g, "管理会社__MGR__");
+
+  return { masked: t, tokens };
+}
+function unmaskFacts(text: string, tokens: LockTokens): string {
+  let t = text || "";
+  if (tokens.STWALK)  t = t.replace(/__STWALK__/g, tokens.STWALK);
+  if (tokens.STRUCT)  t = t.replace(/__STRUCT__/g, tokens.STRUCT);
+  if (tokens.UNITS)   t = t.replace(/__UNITS__/g, tokens.UNITS);
+  if (tokens.FLOORS)  t = t.replace(/__FLOORS__/g, tokens.FLOORS);
+  if (tokens.BUILT)   t = t.replace(/__BUILT__/g, tokens.BUILT);
+  if (tokens.DEV)     t = t.replace(/__DEV__/g, `：${tokens.DEV}`);
+  if (tokens.BUILDER) t = t.replace(/__BUILDER__/g, `：${tokens.BUILDER}`);
+  if (tokens.MGR)     t = t.replace(/__MGR__/g, `：${tokens.MGR}`);
+  return normalizeWalk(t);
+}
+/** 既存文中の事実を上書き（衝突してもロック優先） */
+function forceFacts(text: string, facts: ScrapedMeta): string {
+  const { masked, tokens } = maskFacts(text, facts);
+  return unmaskFacts(masked, tokens);
+}
+
+/* ---------- 文字数矯正 ---------- */
 async function ensureLengthDescribe(opts: {
-  openai: OpenAI; draft: string; context: string; min: number; max: number; tone: string; style: string;
+  openai: OpenAI; draft: string; context: string; min: number; max: number; tone: Tone; style: string;
 }) {
-  let out = opts.draft;
+  let out = opts.draft || "";
   for (let i = 0; i < 3; i++) {
     const len = countJa(out);
     if (len >= opts.min && len <= opts.max) return out;
@@ -207,35 +236,25 @@ async function ensureLengthDescribe(opts: {
             'Return ONLY {"text": string}. (json)\n' +
             `日本語・トーン:${opts.tone}。次のスタイルガイドを遵守：\n${opts.style}\n` +
             `目的: 文字数を${opts.min}〜${opts.max}（全角）に${need === "expand" ? "増やし" : "収め"}る。\n` +
-            [
-              "禁止: 数値の捏造（総戸数/階数/築年/面積/帖/構造/向き/間取り）・将来断定（リフォーム/修繕/完了予定）。",
-              "禁止: 価格/金額/円/万円・電話番号・URL・誇張表現。",
-              "一般的で安全な叙述で調整する。"
-            ].join(" ")
+            "事実が不足する場合は一般的で安全な叙述で補い、固有の事実を創作しない。価格/金額/円/万円・電話番号・URLは禁止。"
         },
-        {
-          role: "user",
-          content: JSON.stringify({
-            current_text: out,
-            extracted_text: opts.context,
-            action: need
-          })
-        }
+        { role: "user", content: JSON.stringify({ current_text: out, extracted_text: opts.context, action: need }) }
       ]
     });
     try {
-      out = String(JSON.parse(r.choices?.[0]?.message?.content || "{}")?.text || out);
-    } catch { /* no-op */ }
+      const maybe = JSON.parse(r.choices?.[0]?.message?.content || "{}")?.text;
+      if (typeof maybe === "string" && maybe.trim()) out = maybe;
+    } catch { /* keep current out */ }
     out = stripPriceAndSpaces(out);
     out = stripWords(out, BANNED);
-    out = dropNgSentences(out);          // ここでもう一度文ごと落とす
-    out = microClean(out);
+    out = normalizeWalk(out);
     if (countJa(out) > opts.max) out = hardCapJa(out, opts.max);
   }
   return out;
 }
 
-async function polishJapanese(openai: OpenAI, text: string, tone: string, style: string) {
+/* ---------- 校正 ---------- */
+async function polishJapanese(openai: OpenAI, text: string, tone: Tone, style: string) {
   const r = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0,
@@ -243,27 +262,25 @@ async function polishJapanese(openai: OpenAI, text: string, tone: string, style:
     messages: [
       {
         role: "system",
-        content: 'Return ONLY {"text": string}. (json)\n' +
-          `以下の日本語を校正。文末は「です/ます」。体言止めは最大2文。トーン:${tone}\n${style}\n` +
-          "禁止: 数値断定（総戸数/階数/築年/面積/帖/構造/向き/間取り）・将来断定（リフォーム/修繕）。"
+        content:
+          'Return ONLY {"text": string}. (json)\n' +
+          `以下の日本語を校正してください。不自然な表現や文法を直し、文末は「です」「ます」で統一。体言止めは最大2文。トーン:${tone}\n${style}\n` +
+          "ロックトークン __STWALK__/__UNITS__/__STRUCT__/__FLOORS__/__BUILT__/__DEV__/__BUILDER__/__MGR__ は変えずに保持すること。"
       },
       { role: "user", content: JSON.stringify({ current_text: text }) }
     ]
   });
   try {
-    const out = JSON.parse(r.choices[0].message?.content || "{}")?.text || text;
-    return dropNgSentences(stripWords(stripPriceAndSpaces(microClean(out)), BANNED));
-  } catch {
-    return dropNgSentences(stripWords(stripPriceAndSpaces(microClean(text)), BANNED));
-  }
+    const maybe = JSON.parse(r.choices?.[0]?.message?.content || "{}")?.text;
+    return typeof maybe === "string" && maybe.trim() ? maybe : text;
+  } catch { return text; }
 }
 
-/* ======================== handler ======================== */
-
+/* ---------- handler ---------- */
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const {
+    let {
       name,
       url,
       mustWords = [],
@@ -272,32 +289,49 @@ export async function POST(req: Request) {
       maxChars = 550,
     } = body || {};
 
+    tone = normalizeTone(tone);
+
     if (!name || !url) {
       return new Response(JSON.stringify({ error: "name / url は必須です" }), { status: 400 });
     }
 
-    // 物件ページを取得→テキスト化
-    const resp = await fetch(url, { headers: { "user-agent": "Mozilla/5.0" }, cache: "no-store" });
-    if (!resp.ok) {
-      return new Response(JSON.stringify({ error: `URL取得失敗 (${resp.status})` }), { status: 400 });
-    }
-    const extracted_text = htmlToText(await resp.text()).slice(0, 40000);
+    // 物件ページを取得
+    let html = "";
+    try {
+      const resp = await fetch(url, { headers: { "user-agent": "Mozilla/5.0" }, cache: "no-store" });
+      if (resp.ok) html = await resp.text();
+    } catch { /* noop */ }
+
+    const extracted_text = htmlToText(html).slice(0, 40000);
+    const meta = scrapeMeta(html);
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const STYLE_GUIDE = styleGuide(tone);
 
-    /* ① 生成（捏造禁止を明示。must_includeの数値系は要求しない） */
+    /* ① 生成（ロックトークンを指示） */
     const system =
-      'Return ONLY {"text": string}. (json)\n' +
+      'Return ONLY a json object like {"text": string}. (json)\n' +
       [
         "あなたは日本語の不動産コピーライターです。",
         `トーン: ${tone}。次のスタイルガイドに従う。`,
         STYLE_GUIDE,
         `文字数は【厳守】${minChars}〜${maxChars}（全角）。`,
         "事実ベース。価格/金額/円/万円・電話番号・外部URLは禁止。",
-        "禁止: 総戸数/階数/築年/面積/帖/構造/向き/間取り/リフォーム予定などの断定・数値の新規記載。",
-        `禁止語も使わない：${BANNED.join("、")}`
+        "次のトークンは【そのまま】出力し、語尾も改変しない: __STWALK__, __UNITS__, __STRUCT__, __FLOORS__, __BUILT__, __DEV__, __BUILDER__, __MGR__",
+        "徒歩表現は必ず『徒歩約N分』とする。"
       ].join("\n");
+
+    // ロックを前提にした安全な雛形（不足項目は省略可）
+    const prelocked =
+      [
+        `${name}は、__STWALK__に位置する分譲マンションです。`,
+        meta.structure ? `建物は__STRUCT__、__FLOORS__の規模で、総戸数は__UNITS__です。` : "",
+        meta.built ? `築年は__BUILT__です。` : "",
+        meta.dev ? `分譲会社は__DEV__、` : "",
+        meta.builder ? `施工会社は__BUILDER__、` : "",
+        meta.mgr ? `管理会社は__MGR__です。` : "",
+        "周辺には生活利便施設が点在し、落ち着いた住環境が広がります。"
+      ].join("").replace(/\s+/g, " ").trim();
 
     const payload = {
       name,
@@ -305,34 +339,37 @@ export async function POST(req: Request) {
       tone,
       extracted_text,
       must_words: normMustWords(mustWords),
-      char_range: { min: minChars, max: maxChars }
-      // ※ must_include は数値系を強制しない方針に変更
+      char_range: { min: minChars, max: maxChars },
+      seed_text: prelocked
     };
-
-    const r1 = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: JSON.stringify(payload) },
-      ],
-    });
 
     let text = "";
     try {
+      const r1 = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: JSON.stringify(payload) },
+        ],
+      });
       const raw = r1.choices?.[0]?.message?.content || "{}";
-      text = String(JSON.parse(raw)?.text || "");
-    } catch { text = ""; }
+      const parsed = JSON.parse(raw);
+      if (typeof parsed?.text === "string") text = parsed.text;
+    } catch {
+      text = prelocked || `${name}は、落ち着いた住環境と日常の利便性を兼ね備えた分譲マンションです。`;
+    }
 
-    // ② サニタイズ（価格/誇張→削除、徒歩表記の正規化、NG文ごと削除）
+    // ② サニタイズ（ロックは保持）
     text = stripPriceAndSpaces(text);
     text = stripWords(text, BANNED);
     text = normalizeWalk(text);
-    text = dropNgSentences(text);
-    text = microClean(text);
 
-    // ③ 長さ矯正（最大3回／捏造禁止のまま）
+    // ③ ロック適用（上書き）
+    text = forceFacts(text, meta);
+
+    // ④ 長さ矯正
     text = await ensureLengthDescribe({
       openai,
       draft: text,
@@ -343,18 +380,20 @@ export async function POST(req: Request) {
       style: STYLE_GUIDE,
     });
 
-    // ④ 校正（捏造禁止のガード付き）
-    text = await polishJapanese(openai, text, tone, STYLE_GUIDE);
+    // ⑤ 校正（トークン保持）→ 復元・最終ロック
+    const { masked, tokens } = maskFacts(text, meta);
+    let polished = await polishJapanese(openai, masked, tone, STYLE_GUIDE);
+    text = unmaskFacts(polished, tokens);
+    text = forceFacts(text, meta);
 
-    // ⑤ 最終クリーン＆上限カット
-    text = normalizeWalk(microClean(text));
+    // ⑥ 上限は最終カット
     if (countJa(text) > maxChars) text = hardCapJa(text, maxChars);
 
-    return new Response(JSON.stringify({ text }), {
+    return new Response(JSON.stringify({ text, meta }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   } catch (e: any) {
-    return new Response(JSON.stringify({ error: e?.message || "server error" }), { status: 500 });
+    return new Response(JSON.stringify({ error: e?.message || "server error", text: "" }), { status: 200 });
   }
 }
