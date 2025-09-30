@@ -1,4 +1,3 @@
-// app/api/describe/route.ts
 export const runtime = "nodejs";
 import OpenAI from "openai";
 
@@ -51,6 +50,7 @@ const BANNED = [
   "抜群","一流","秀逸","羨望","屈指","特選","厳選","正統","由緒正しい","地域でナンバーワン","最高","最高級","極","特級","最新",
   "最適","至便","至近","一級","絶好","買得","掘出","土地値","格安","投売り","破格","特安","激安","安値","バーゲンセール",
   "ディズニー","ユニバーサルスタジオ",
+  // 勧誘ワード
   "お問い合わせ","お問合せ","お気軽に","ぜひ一度ご覧","ご連絡ください","見学予約","内見"
 ];
 
@@ -69,10 +69,9 @@ function styleGuide(toneInput: any): string {
   if (tone === "親しみやすい") {
     return [
       "文体: 親しみやすく、やわらかい丁寧語。誇張・絵文字・感嘆記号は抑制。",
-      "構成: ①立地・雰囲気 ②敷地/外観の印象 ③アクセス ④共用/サービス ⑤日常シーンを想起させる結び。",
+      "構成: ①立地・雰囲気 ②敷地/外観の印象 ③アクセス ④共用/サービス ⑤日常シーンの結び。",
       "語彙例: 「〜がうれしい」「〜を感じられます」「〜にも便利」「〜に寄り添う」。",
-      "文長: 30〜60字中心。",
-      "文末は「です」「ます」で統一。不自然な文法は禁止。"
+      "文長: 30〜60字中心。文末は「です」「ます」。"
     ].join("\n");
   }
   if (tone === "一般的") {
@@ -80,21 +79,18 @@ function styleGuide(toneInput: any): string {
       "文体: 中立・説明的で読みやすい丁寧語。事実ベースで誇張を避ける。",
       "構成: ①全体概要 ②規模/デザイン ③アクセス ④共用/管理 ⑤まとめ。",
       "語彙例: 「〜に位置」「〜を採用」「〜が整う」「〜を提供」。",
-      "文長: 40〜70字中心。",
-      "文末は「です」「ます」で統一。不自然な文法は禁止。"
+      "文長: 40〜70字中心。文末は「です」「ます」。"
     ].join("\n");
   }
-  // 上品・落ち着いた（既定）
   return [
     "文体: 上品・落ち着いた・事実ベース。過度な誇張や感嘆記号は避ける。",
-    "構成: ①全体コンセプト/立地 ②敷地規模・ランドスケープ ③建築/デザイン ④交通アクセス ⑤共用/サービス ⑥結び。",
-    "語彙例: 「〜という全体コンセプトのもと」「〜を実現」「〜に相応しい」「〜がひろがる」「〜を提供します」。",
-    "文長: 40〜70字中心。体言止めは1〜2文に留める。",
-    "文末は「です」「ます」で統一。不自然な文法は禁止。"
+    "構成: ①コンセプト/立地 ②ランドスケープ ③建築/デザイン ④交通 ⑤共用/サービス ⑥結び。",
+    "語彙例: 「〜という全体コンセプトのもと」「〜を実現」「〜に相応しい」。",
+    "文長: 40〜70字中心。体言止めは1〜2文まで。文末は「です」「ます」。"
   ].join("\n");
 }
 
-/** draft を min〜max に収める矯正（最大3回） */
+/** draft を min〜max に収める（最大3回） */
 async function ensureLengthDescribe(opts: {
   openai: OpenAI; draft: string; context: string; min: number; max: number; tone: Tone; style: string;
 }) {
@@ -168,17 +164,15 @@ export async function POST(req: Request) {
     tone = normalizeTone(tone);
 
     if (!name || !url) {
-      return new Response(JSON.stringify({
-        ok: false, error: "name / url は必須です", text: ""
-      }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ error: "name / url は必須です" }), { status: 400 });
     }
 
-    // 物件ページを取得 → テキスト化（失敗しても続行）
+    // 物件ページ→テキスト化（失敗しても続行）
     let extracted_text = "";
     try {
       const resp = await fetch(url, { headers: { "user-agent": "Mozilla/5.0" }, cache: "no-store" });
       if (resp.ok) extracted_text = htmlToText(await resp.text()).slice(0, 40000);
-    } catch { /* ignore */ }
+    } catch { /* noop */ }
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const STYLE_GUIDE = styleGuide(tone);
@@ -202,13 +196,8 @@ export async function POST(req: Request) {
       extracted_text,
       must_words: normMustWords(mustWords),
       char_range: { min: minChars, max: maxChars },
-      // draft で固有数値や方位を“積極的に出さない”が、棟の基本情報は可
-      must_include: {
-        name_times: 2,
-        transport_times: 1,
-        fields: ["階建","総戸数","建物構造","管理会社","築年"]
-      },
-      do_not_include: ["リフォーム内容","方位","面積", ...BANNED],
+      // Describeでは「基本情報(戸数/構造/築年/管理)を消さない」方針
+      do_not_include: ["リフォーム内容","方位","面積","お問い合わせ文言", ...BANNED],
     };
 
     let text = "";
@@ -233,7 +222,7 @@ export async function POST(req: Request) {
     text = stripPriceAndSpaces(text);
     text = stripWords(text, BANNED);
 
-    // ② 長さ矯正（最大3回）
+    // ② 長さ調整
     text = await ensureLengthDescribe({
       openai,
       draft: text,
@@ -247,17 +236,15 @@ export async function POST(req: Request) {
     // ③ 校正
     text = await polishJapanese(openai, text, tone, STYLE_GUIDE);
 
-    // ④ 上限は最終カット
+    // ④ 上限カット
     if (countJa(text) > maxChars) text = hardCapJa(text, maxChars);
 
-    return new Response(JSON.stringify({ ok: true, text }), {
+    return new Response(JSON.stringify({ text }), {
       status: 200,
       headers: { "content-type": "application/json" },
     });
   } catch (e: any) {
-    return new Response(JSON.stringify({ ok: false, error: e?.message || "server error", text: "" }), {
-      status: 200, // 200固定（白画面防止）
-      headers: { "content-type": "application/json" },
-    });
+    // フロントの白画面を避けるため、200でエラー内容と空テキストを返す
+    return new Response(JSON.stringify({ error: e?.message || "server error", text: "" }), { status: 200 });
   }
 }
