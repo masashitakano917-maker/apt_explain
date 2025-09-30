@@ -1,7 +1,7 @@
 // app/api/review/route.ts
 export const runtime = "nodejs";
 
-/* ────────────────────────────── 基本ユーティリティ ────────────────────────────── */
+/* ─────────────── 基本ユーティリティ ─────────────── */
 
 const DIGIT = "[0-9０-９]";
 const SENT_SPLIT = /(?<=[。！？\?])\s*(?=[^\s])/g;
@@ -27,8 +27,9 @@ function microClean(s: string) {
     .trim();
 }
 
-/* ────────────────────────────── NG ルール（該当"文"のみ削除） ──────────────────────────────
-   ※ 棟の基本情報（総戸数・構造・築年・管理）は "削除対象から除外" しています！
+/* ─────────────── NG ルール（該当“文”のみ削除） ───────────────
+   ※ 棟の基本情報（総戸数・構造・築年・管理）は削除対象から除外したいので、
+      それらだけ別途「不足していたら末尾に補足」します。
 */
 type Check = { id: string; label: string; re: RegExp };
 
@@ -58,7 +59,7 @@ const CHECKS: Check[] = [
   { id: "phone",   label: "電話番号",   re: /(0\d{1,4}-\d{1,4}-\d{3,4})|（0\d{1,4}）\d{1,4}-\d{3,4}/ },
   { id: "url",     label: "外部URL",    re: /(https?:\/\/|www\.)\S+/ },
 
-  // 勧誘・呼びかけ（この文は削除）
+  // 勧誘・呼びかけ
   {
     id: "solicit",
     label: "勧誘・呼びかけ",
@@ -69,14 +70,14 @@ const CHECKS: Check[] = [
   { id: "hype", label: "誇張表現", re: /(完全|完ぺき|絶対|万全|100％|日本一|業界一|最高級|極|特級|至近|至便|破格|激安|特選|厳選)/ },
 ];
 
-/* ────────────────────────────── レビュー（削るだけ） ────────────────────────────── */
+/* ─────────────── 物件基本情報の補足 ─────────────── */
 
 type Facts = {
-  units?: number | string;        // 例: 19 / "19"
+  units?: number | string;        // 例: 19
   structure?: string;             // 例: "鉄筋コンクリート造"
-  built?: string;                  // 例: "1984年10月築"
-  management?: string;             // 例: "管理会社に全部委託・巡回"
-  maintFeeNote?: string;           // 任意
+  built?: string;                 // 例: "1984年築" / "1984年10月築"
+  management?: string;            // 例: "管理会社に全部委託・巡回"
+  maintFeeNote?: string;          // 任意の補足
 };
 
 function containsUnits(t: string) {
@@ -92,7 +93,7 @@ function containsMgmt(t: string) {
   return /(管理会社|管理形態|管理方式|日勤|常駐|巡回)/.test(t);
 }
 
-/** 与えられた facts があれば、文末に静かに補足（存在しない要素のみ） */
+/** facts があれば本文に無い要素だけ静かに末尾へ補足 */
 function appendFactsIfMissing(text: string, facts?: Facts) {
   if (!facts) return text;
 
@@ -112,11 +113,12 @@ function appendFactsIfMissing(text: string, facts?: Facts) {
     tails.push(`${facts.management}の管理体制です。`);
   }
   if (facts.maintFeeNote) {
-    // 任意の管理に関する注釈（入っていれば一文で追記）
     tails.push(facts.maintFeeNote.replace(/。?$/, "。"));
   }
   return tails.length ? microClean(text + (text.endsWith("。") ? "" : "。") + tails.join("")) : text;
 }
+
+/* ─────────────── 本体：削除のみ（再構成なし） ─────────────── */
 
 function reviewDeleteOnly(input: string, facts?: Facts) {
   const original = (input || "").trim();
@@ -131,7 +133,7 @@ function reviewDeleteOnly(input: string, facts?: Facts) {
       if (c.re.test(s)) reasons.push({ id: c.id, label: c.label });
     }
     if (reasons.length) {
-      hits.push({ sentence: s, reasons });
+      hits.push({ sentence: s, reasons });      // 左ペイン表示用（削除した文）
     } else {
       kept.push(s);
     }
@@ -146,36 +148,62 @@ function reviewDeleteOnly(input: string, facts?: Facts) {
   return { improved, hits, original };
 }
 
-/* ────────────────────────────── handler ────────────────────────────── */
+/* ─────────────── handler ─────────────── */
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const {
       text = "",
-      facts = {} as Facts, // { units, structure, built, management, maintFeeNote } を任意で渡せます
+      facts = {} as Facts, // { units, structure, built, management, maintFeeNote } 任意
     } = body || {};
 
     if (!text) {
-      return new Response(JSON.stringify({ error: "text は必須です" }), { status: 400 });
+      return new Response(JSON.stringify({ ok: false, error: "text は必須です" }), {
+        status: 200, headers: { "content-type": "application/json" }
+      });
     }
 
     const { improved, hits, original } = reviewDeleteOnly(text, facts);
 
+    // 互換フィールドを“必ず”返す（フロントの map で落ちないように）
+    const legacyIssues = hits.map(h => ({ sentence: h.sentence, reasons: h.reasons }));
     return new Response(JSON.stringify({
       ok: true,
       original,
       improved,
-      // 左ペイン用：削除した“文”と理由
-      issues: hits.map(h => ({ sentence: h.sentence, reasons: h.reasons })),
-      // 互換フィールド
+      // 現行
+      issues: legacyIssues,
+      // 互換（以前のフロントが参照しても落ちないよう冗長に同報）
       text_after_check: improved,
-      issues_structured: hits
+      text_after_polish: null,
+      auto_fixed: false,
+      polish_applied: false,
+      polish_notes: [],
+      issues_before: legacyIssues,            // 旧UI互換
+      issues_details_before: hits,            // 旧UI互換
+      issues_structured_before: hits,         // 旧UI互換
+      issues_structured: hits,                // 現行/旧 両対応
+      summary: ""
     }), { status: 200, headers: { "content-type": "application/json" } });
   } catch (e: any) {
-    return new Response(JSON.stringify({ ok: false, error: e?.message || "server error" }), {
-      status: 500,
-      headers: { "content-type": "application/json" },
-    });
+    // 500 を返すとフロントが落ちるケースがあるため常に 200 でエラー説明を返す
+    return new Response(JSON.stringify({
+      ok: false,
+      error: e?.message || "server error",
+      original: "",
+      improved: "",
+      issues: [],
+      text_after_check: "",
+      text_after_polish: null,
+      auto_fixed: false,
+      polish_applied: false,
+      polish_notes: [],
+      issues_before: [],
+      issues_details_before: [],
+      issues_structured_before: [],
+      issues_structured: [],
+      summary: ""
+    }), { status: 200, headers: { "content-type": "application/json" } });
   }
 }
