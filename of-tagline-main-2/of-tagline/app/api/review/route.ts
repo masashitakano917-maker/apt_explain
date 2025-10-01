@@ -37,7 +37,7 @@ const CHECKS: Check[] = [
   { id: "unit-tatami", label: "帖/畳",         re: new RegExp(`約?\\s*${DIGIT}{1,3}(?:\\.\\d+)?\\s*(帖|畳|Ｊ|J|jo)`) },
   { id: "unit-plan",   label: "間取り",       re: /\b([1-5]\s*LDK|[12]\s*DK|[1-3]\s*K|[1-3]\s*R)\b/ },
   { id: "unit-facing", label: "方位・角部屋", re: /(角部屋|角住戸|最上階|高層階|低層階|南向き|東向き|西向き|北向き|南東向き|南西向き|北東向き|北西向き)/ },
-  { id: "unit-floorpart", label: "階部分",   re: new RegExp(`${DIGIT}+\\s*階部分`) },
+  { id: "unit-floorpart", label: "階部分/所在", re: new RegExp(`${DIGIT}+\\s*階(?:部分|に位置|所在)`) },
   { id: "unit-features",  label: "住戸専用設備名", re: /(ウォークインクローゼット|WIC|ウォークインCL|床暖房|浴室乾燥機|食洗機|食器洗(?:い)?乾燥機|ディスポーザー|カウンターキッチン|追い焚き|シューズインクローゼット|SIC)/ },
 
   // 将来予定・断定（リフォーム/修繕）
