@@ -3,7 +3,7 @@
 import React, { useMemo, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
 
-/* ========= helpers ========= */
+/* ========= small utils ========= */
 const cn = (...a: (string | false | null | undefined)[]) => a.filter(Boolean).join(" ");
 const jaLen = (s: string) => Array.from(s || "").length;
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
@@ -29,18 +29,82 @@ function markDiffRed(original: string, improved: string) {
   return out.join("");
 }
 
+/* ========= SAFE fetch wrappers（白画面防止） ========= */
+async function safeJson<T = any>(input: RequestInfo, init?: RequestInit): Promise<T | null> {
+  try {
+    const res = await fetch(input, init);
+    const txt = await res.text().catch(() => "");
+    if (!txt) return {} as T;
+    try { return JSON.parse(txt) as T; } catch { return {} as T; }
+  } catch { return null; }
+}
+
+async function callDescribe(payload: {
+  name: string;
+  url: string;
+  tone?: string;
+  minChars?: number;
+  maxChars?: number;
+  mustWords?: string[] | string;
+}) {
+  const j = await safeJson<{ text?: string; error?: string }>("/api/describe", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return (j?.text && typeof j.text === "string") ? j.text : "";
+}
+
+type ReviewIssue = { sentence: string; reasons: { id: string; label: string }[] };
+async function callReview(draftText: string, facts?: {
+  units?: number | string;
+  structure?: string;
+  built?: string;
+  management?: string;
+  maintFeeNote?: string;
+}) {
+  const j = await safeJson<{
+    ok?: boolean;
+    improved?: string;
+    text_after_check?: string;
+    issues?: ReviewIssue[];
+    text_after_polish?: string;
+    auto_fixed?: boolean;
+    polish_applied?: boolean;
+    polish_notes?: string[];
+    summary?: string;
+    error?: string;
+  }>("/api/review", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: draftText ?? "", facts: facts ?? {} }),
+  });
+
+  const improved =
+    (j?.improved && typeof j.improved === "string" && j.improved.trim()) ||
+    (j?.text_after_check && typeof j.text_after_check === "string" && j.text_after_check.trim()) ||
+    (draftText ?? "");
+
+  const issues = Array.isArray(j?.issues) ? j!.issues : [];
+  return {
+    improved,
+    issues,
+    text_after_polish: typeof j?.text_after_polish === "string" ? j!.text_after_polish : "",
+    auto_fixed: Boolean(j?.auto_fixed),
+    polish_applied: Boolean(j?.polish_applied),
+    polish_notes: Array.isArray(j?.polish_notes) ? j!.polish_notes! : [],
+    summary: j?.summary || "",
+  };
+}
+
 /* ========= Tracker UI ========= */
 type StepState = "idle" | "active" | "done";
 type StepKey = "draft" | "check" | "polish";
 
 function StepDot({ state }: { state: StepState }) {
   const base = "w-6 h-6 rounded-full flex items-center justify-center border select-none";
-  if (state === "done") {
-    return <div className={cn(base, "bg-black border-black text-white")}>✓</div>;
-  }
-  if (state === "active") {
-    return <div className={cn(base, "bg-orange-500/90 border-orange-600 text-white animate-pulse")}>✓</div>;
-  }
+  if (state === "done") return <div className={cn(base, "bg-black border-black text-white")}>✓</div>;
+  if (state === "active") return <div className={cn(base, "bg-orange-500/90 border-orange-600 text-white animate-pulse")}>✓</div>;
   return <div className={cn(base, "bg-neutral-200 border-neutral-300")} />;
 }
 
@@ -61,10 +125,7 @@ function StepTrack({
               <button
                 type="button"
                 onClick={() => clickable && onStepClick?.(s.key)}
-                className={cn(
-                  "flex flex-col items-center focus:outline-none",
-                  clickable ? "cursor-pointer" : "cursor-default"
-                )}
+                className={cn("flex flex-col items-center focus:outline-none", clickable ? "cursor-pointer" : "cursor-default")}
                 aria-label={`${s.label}へスクロール`}
               >
                 <StepDot state={s.state} />
@@ -110,6 +171,13 @@ export default function Page() {
   const [minChars, setMinChars] = useState(450);
   const [maxChars, setMaxChars] = useState(550);
 
+  // 追加：基本情報（facts, 任意）
+  const [units, setUnits] = useState<string>("");
+  const [structure, setStructure] = useState<string>(""); // RC / SRC / 鉄筋コンクリート造 など
+  const [built, setBuilt] = useState<string>("");         // 例: 1984年10月築
+  const [management, setManagement] = useState<string>(""); // 例: 管理会社に全部委託・巡回
+  const [maintFeeNote, setMaintFeeNote] = useState<string>("");
+
   // 生成・通信状態
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -123,8 +191,8 @@ export default function Page() {
   const [diff12Html, setDiff12Html] = useState("");
   const [diff23Html, setDiff23Html] = useState("");
 
-  // チェック結果（Before表示用）
-  const [issues2, setIssues2] = useState<string[]>([]);
+  // チェック結果（左ペイン相当）
+  const [issues2, setIssues2] = useState<{ sentence: string; reasons: { id: string; label: string }[] }[]>([]);
   const [summary2, setSummary2] = useState("");
 
   // Polishのメモとフラグ
@@ -183,20 +251,14 @@ export default function Page() {
       // Draft: start
       setDraftStep("active");
 
-      // ① 初回生成
-      const res = await fetch("/api/describe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, url, mustWords: mustInput, tone, minChars, maxChars }),
+      // ① 初回生成（安全ラッパー）
+      const generated = await callDescribe({
+        name, url, mustWords: mustInput, tone, minChars, maxChars,
       });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || "生成に失敗しました。");
-      const generated = String(j?.text || "");
-      setText1(generated);
+      setText1(generated || "");
 
       // Draft: done
       setDraftStep("done");
-      // ドラフトのカードへスクロール
       setTimeout(() => scrollTo("draft"), 0);
 
       // ②（→③まで）自動チェック
@@ -210,7 +272,7 @@ export default function Page() {
     }
   }
 
-  /* ------------ チェック（APIは②と③の両方を返す） ------------ */
+  /* ------------ チェック（Describeとは独立に安全実行） ------------ */
   async function handleCheck(baseText?: string, suppressBusy = false) {
     try {
       const src = (baseText ?? text1).trim();
@@ -225,38 +287,31 @@ export default function Page() {
       setIssues2([]); setSummary2(""); setDiff12Html(""); setDiff23Html("");
       setPolishNotes([]); setPolishApplied(false); setAutoFixed(false);
 
-      const res = await fetch("/api/review", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: src,
-          name, url, mustWords: mustInput,
-          tone,
-          minChars, maxChars,
-        }),
-      });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j?.error || "チェックに失敗しました。");
+      // facts（任意入力を渡す）
+      const factsPayload: any = {};
+      if (units) factsPayload.units = units;
+      if (structure) factsPayload.structure = structure;
+      if (built) factsPayload.built = built;
+      if (management) factsPayload.management = management;
+      if (maintFeeNote) factsPayload.maintFeeNote = maintFeeNote;
+
+      const r = await callReview(src, factsPayload);
 
       // ② 安全チェック済
-      const afterCheck = String(j?.text_after_check ?? j?.improved ?? src);
+      const afterCheck = r.improved || src;
       setText2(afterCheck);
 
-      const issuesBefore = Array.isArray(j?.issues_before) ? j.issues_before
-                        : Array.isArray(j?.issues) ? j.issues : [];
-      const summary = j?.summary || (issuesBefore.length ? issuesBefore.join(" / ") : "");
-      setIssues2(issuesBefore);
-      setSummary2(summary);
+      // 左ペイン：削除文と理由
+      setIssues2(r.issues || []);
+      setSummary2(r.summary || "");
 
       // Check: done & スクロール
       setCheckStep("done");
       setTimeout(() => scrollTo("check"), 0);
 
-      // Polish: start
-      setPolishStep("active");
-
       // ③ 仕上げ（採用時のみ反映）
-      const afterPolish = typeof j?.text_after_polish === "string" ? j.text_after_polish : "";
+      setPolishStep("active");
+      const afterPolish = r.text_after_polish || "";
       setText3(afterPolish);
 
       // 差分
@@ -264,14 +319,13 @@ export default function Page() {
       setDiff23Html(afterPolish ? markDiffRed(afterCheck, afterPolish) : "");
 
       // フラグとメモ
-      setAutoFixed(Boolean(j?.auto_fixed));
-      setPolishApplied(Boolean(j?.polish_applied));
-      setPolishNotes(Array.isArray(j?.polish_notes) ? j.polish_notes : []);
+      setAutoFixed(Boolean(r.auto_fixed));
+      setPolishApplied(Boolean(r.polish_applied));
+      setPolishNotes(r.polish_notes || []);
 
       // Polish: done/idle & スクロール
-      const applied = Boolean(j?.polish_applied);
-      setPolishStep(applied ? "done" : "idle");
-      if (applied) setTimeout(() => scrollTo("polish"), 0);
+      setPolishStep(r.polish_applied ? "done" : "idle");
+      if (r.polish_applied) setTimeout(() => scrollTo("polish"), 0);
 
       setCheckStatus("done");
     } catch (err: any) {
@@ -288,6 +342,7 @@ export default function Page() {
     setName(""); setUrl(""); setMustInput("");
     setTone("上品・落ち着いた");
     setMinChars(450); setMaxChars(550);
+    setUnits(""); setStructure(""); setBuilt(""); setManagement(""); setMaintFeeNote("");
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
     setIssues2([]); setSummary2("");
@@ -295,11 +350,10 @@ export default function Page() {
     setError(null);
     setCheckStatus("idle");
     setDraftStep("idle"); setCheckStep("idle"); setPolishStep("idle");
-    // 先頭へ
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  const copy = async (text: string) => { try { await navigator.clipboard.writeText(text); } catch {} };
+  const copy = async (text: string) => { try { await navigator.clipboard.writeText(text || ""); } catch {} };
 
   const statusLabel =
     checkStatus === "running" ? "実行中…" :
@@ -310,7 +364,6 @@ export default function Page() {
     checkStatus === "done"    ? "bg-emerald-100 text-emerald-700" :
     checkStatus === "error"   ? "bg-red-100 text-red-700" : "bg-neutral-100 text-neutral-600";
 
-  /* Tracker の表示内容 */
   const stepsForTracker = [
     { key: "draft"  as StepKey, label: "ドラフト",      sub: draftStep === "active" ? "作成中" : draftStep === "done" ? "完了" : "", state: draftStep },
     { key: "check"  as StepKey, label: "安全チェック",  sub: checkStep === "active" ? "実行中" : checkStep === "done" ? "完了" : "", state: checkStep },
@@ -326,7 +379,7 @@ export default function Page() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-5 py-6 grid lg:grid-cols-[minmax(360px,500px)_1fr] gap-6">
+      <main className="max-w-7xl mx-auto px-5 py-6 grid lg:grid-cols-[minmax(360px,520px)_1fr] gap-6">
         {/* 左カラム：入力 */}
         <form onSubmit={handleGenerate} className="space-y-4">
           <section className="bg-white rounded-2xl shadow p-4 space-y-3">
@@ -404,6 +457,38 @@ export default function Page() {
                 </div>
               </div>
 
+              {/* 新規：基本情報（任意、/api/review の facts へ） */}
+              <details className="rounded-lg border bg-neutral-50 p-3">
+                <summary className="cursor-pointer text-sm font-medium">基本情報（任意・本文に無い場合だけ末尾に自動補足）</summary>
+                <div className="grid grid-cols-2 gap-3 mt-3">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-neutral-600">総戸数</span>
+                    <input className="border rounded p-2" placeholder="例）19"
+                      value={units} onChange={(e)=>setUnits(e.target.value)} />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-neutral-600">構造（RC/SRC/鉄筋コンクリート造など）</span>
+                    <input className="border rounded p-2" placeholder="例）RC"
+                      value={structure} onChange={(e)=>setStructure(e.target.value)} />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-neutral-600">築年</span>
+                    <input className="border rounded p-2" placeholder="例）1984年10月築"
+                      value={built} onChange={(e)=>setBuilt(e.target.value)} />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-neutral-600">管理体制</span>
+                    <input className="border rounded p-2" placeholder="例）管理会社に全部委託・巡回"
+                      value={management} onChange={(e)=>setManagement(e.target.value)} />
+                  </label>
+                  <label className="flex flex-col gap-1 col-span-2">
+                    <span className="text-xs text-neutral-600">管理に関する補足（任意）</span>
+                    <input className="border rounded p-2" placeholder="例）長期修繕計画あり（任意）"
+                      value={maintFeeNote} onChange={(e)=>setMaintFeeNote(e.target.value)} />
+                  </label>
+                </div>
+              </details>
+
               <div className="flex gap-3">
                 <Button type="submit" disabled={busy || !name || !url}>
                   {busy && checkStatus !== "running" ? "処理中…" : "文章を生成"}
@@ -435,14 +520,18 @@ export default function Page() {
               </div>
             </div>
 
-            {/* 要点（Beforeの指摘） */}
-            {(issues2.length > 0 || summary2) && (
+            {/* 要点（削除文の詳細） */}
+            {issues2.length > 0 && (
               <div className="space-y-2">
-                {issues2.length > 0 && (
-                  <ul className="text-sm list-disc pl-5 space-y-1">
-                    {issues2.map((it, i) => <li key={i}>{it}</li>)}
-                  </ul>
-                )}
+                {issues2.map((it, i) => (
+                  <div key={i} className="rounded border p-2">
+                    <div className="text-xs text-neutral-500 mb-1">削除された文</div>
+                    <div className="text-sm mb-1 break-words">{it.sentence}</div>
+                    <ul className="text-xs text-neutral-600 list-disc pl-4">
+                      {(it.reasons || []).map((r, j) => <li key={j}>{r.label ?? r.id}</li>)}
+                    </ul>
+                  </div>
+                ))}
                 {!!summary2 && <div className="text-xs text-neutral-500">要約: {summary2}</div>}
               </div>
             )}
@@ -516,14 +605,6 @@ export default function Page() {
               {text2 ? (
                 <>
                   <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text2}</p>
-                  {issues2.length > 0 && (
-                    <details className="mt-2">
-                      <summary className="cursor-pointer text-xs text-neutral-600">チェック結果（改善前の指摘）</summary>
-                      <ul className="mt-2 list-disc pl-5 text-xs text-neutral-700">
-                        {issues2.map((x, i) => <li key={i}>{x}</li>)}
-                      </ul>
-                    </details>
-                  )}
                 </>
               ) : (
                 <div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>
@@ -566,7 +647,7 @@ export default function Page() {
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
               ※ ドラフトは <code>/api/describe</code>、安全チェック/仕上げは <code>/api/review</code> を利用。<br/>
-              トラッカーは各リクエストと連動して自動更新・スクロールします。
+              ここでは API 応答の想定外パターンでも例外で落ちないよう、すべて安全化しています。
             </div>
           </div>
         </section>
