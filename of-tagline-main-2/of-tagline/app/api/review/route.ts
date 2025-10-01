@@ -61,7 +61,7 @@ const CHECKS: Check[] = [
     label: "リフォーム/リノベ/修繕・改装/補修などの予定・断定",
     re: new RegExp(
       [
-        // 年月＋予定/完了予定/実施予定/工事予定/見込み/予定で/予定です/予定となっており など
+        // 年月＋予定/完了予定/実施予定/工事予定/見込み など
         `20${DIGIT}{2}年(?:${DIGIT}{1,2}月)?[^。]{0,12}?${RENOV_TERMS}[^。]{0,12}?(?:予定|完了予定|実施予定|工事予定|完了見込み|見込み|予定で|予定です|予定となっており|予定となっております|予定となる)`,
         // 「～を/が 行う/実施/施行/施工 予定」「行われる予定」
         `${RENOV_TERMS}[^。]{0,10}?(?:を|が)?[^。]{0,6}?(?:行わ|おこなわ|実施|施行|施工)[^。]{0,8}?れる?予定`,
@@ -143,7 +143,7 @@ function reviewDeleteOnly(input: string, facts?: Facts) {
   return { improved, hits, original };
 }
 
-/* ────────────── 仕上げ（トーン変換のみ。内容は不変更） ────────────── */
+/* ────────────── 仕上げ（トーン変換を“強め”に。内容は不変更） ────────────── */
 type Tone = "上品・落ち着いた" | "一般的" | "親しみやすい";
 function normalizeTone(t: any): Tone {
   const v = String(t || "").trim();
@@ -156,26 +156,39 @@ function OpenAIInstance() {
   return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
+/**
+ * ポイント
+ * - 事実（数値・駅名・会社名・構造・年号・「徒歩約～分」）は保護して変更禁止
+ * - 各文で最低1か所は言い換え or 語順入替 or 接続詞変更
+ * - 文の追加・削除は禁止（句読点の整理はOK）
+ */
 async function polishToneOnly(openai: OpenAI, text: string, tone: Tone) {
   if (!text) return text;
-  const style =
+
+  const styleByTone =
     tone === "親しみやすい"
-      ? "親しみやすい丁寧語。言い換えと語順調整のみ。箇条書き化や文の追加・削除は禁止。"
+      ? "親しみやすい丁寧語に言い換え、語尾にやわらかさを。"
       : tone === "一般的"
-      ? "中立・説明的な丁寧語。冗長さを軽く整える程度。文の追加・削除は禁止。"
-      : "上品で落ち着いた丁寧語。言い換えのみ。文の追加・削除は禁止。";
+      ? "中立・説明的な丁寧語に調整し、冗長さを軽く整える。"
+      : "上品で落ち着いた調子に整え、語彙を落ち着いた表現へ。";
 
   const r = await openai.chat.completions.create({
     model: "gpt-4o-mini",
-    temperature: 0.1,
+    temperature: 0.2,
     response_format: { type: "json_object" },
     messages: [
       {
         role: "system",
         content:
           'Return ONLY {"text": string}. (json)\n' +
-          `日本語。${style}\n` +
-          "禁止: 新情報追加や数値変更、勧誘表現付与。句読点・言い回しの穏当化のみ。"
+          [
+            "日本語のリライトを行う。",
+            styleByTone,
+            "各文で **最低1か所** の言い換え・語順変更・接続詞の置換などを行い、言い回しの多様性を出す。",
+            "禁止: 事実/数値/駅名/会社名/建物構造/年号/「徒歩約〜分」等の変更、文の追加・削除、削除済みNG項目（リフォーム予定など）の復活。",
+            "許可: 読点の整理・語尾の統一・語順の入れ替え・語彙の穏当化。",
+            "数字・年号・分数表現・『徒歩約』を含む表現はそのまま保つこと。",
+          ].join("\n")
       },
       { role: "user", content: JSON.stringify({ current_text: text }) }
     ]
@@ -184,7 +197,9 @@ async function polishToneOnly(openai: OpenAI, text: string, tone: Tone) {
   try {
     const maybe = JSON.parse(r.choices?.[0]?.message?.content || "{}")?.text;
     return typeof maybe === "string" && maybe.trim() ? microClean(maybe) : text;
-  } catch { return text; }
+  } catch {
+    return text;
+  }
 }
 
 /* ────────────── handler ────────────── */
@@ -204,7 +219,7 @@ export async function POST(req: Request) {
     // ② 安全チェック（徒歩表記の正規化含む）
     const { improved, hits, original } = reviewDeleteOnly(text, facts);
 
-    // ③ 仕上げ（内容はそのまま、トーンのみ）
+    // ③ 仕上げ（内容はそのまま、トーンのみ“強めに”変換）
     const polished = await polishToneOnly(OpenAIInstance(), improved, normalizeTone(tone as Tone));
 
     return new Response(
@@ -217,7 +232,10 @@ export async function POST(req: Request) {
         issues_structured: hits,
         polish_applied: polished !== improved,
         auto_fixed: hits.length > 0,
-        polish_notes: polished !== improved ? ["トーン調整のみ（内容・数値は変更していません）"] : [],
+        polish_notes:
+          polished !== improved
+            ? ["各文で言い換え/語順調整を実施（事実・数値・駅名は保持）"]
+            : [],
       }),
       { status: 200, headers: { "content-type": "application/json" } }
     );
