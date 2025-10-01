@@ -2,32 +2,48 @@
 export const runtime = "nodejs";
 import OpenAI from "openai";
 
-/* ------------ small utils ------------ */
-const countJa = (s: string) => Array.from(s || "").length;
-const enders = new Set(["。", "！", "？", "."]);
-function hardCapJa(s: string, max: number) {
-  const arr = Array.from(s || "");
-  if (arr.length <= max) return s;
-  const upto = arr.slice(0, max);
-  let cut = -1;
-  for (let i = upto.length - 1; i >= 0; i--) {
-    if (enders.has(upto[i])) { cut = i + 1; break; }
-  }
-  return upto.slice(0, cut > 0 ? cut : max).join("").trim();
+/* ────────────── 事実アンカーの抽出 ──────────────
+   ※ ここで抽出した文字列は、Polish時に「絶対に変えない」指示として渡す
+*/
+const DIGIT = "[0-9０-９]";
+
+function extractAnchors(text: string) {
+  const anchors = new Set<string>();
+
+  const addAll = (re: RegExp) => {
+    for (const m of text.matchAll(re)) {
+      const s = (m[0] || "").trim();
+      if (s) anchors.add(s);
+    }
+  };
+
+  // 駅名・徒歩表記
+  addAll(/「[^」]+」駅/g);                           // 例：「新板橋」駅
+  addAll(new RegExp(`徒歩\\s*約?\\s*${DIGIT}+\\s*分`, "g")); // 例：徒歩約10分 / 徒歩10分
+
+  // 年・年月（築年など）
+  addAll(/(19[5-9]\d|20[0-4]\d)年(?:\s*[0-1]?\d月)?/g); // 例：1998年 / 1991年11月
+
+  // 構造・階建・総戸数
+  addAll(/(鉄筋コンクリート造|鉄骨鉄筋コンクリート造|RC造|SRC造|RC|SRC)/g);
+  addAll(new RegExp(`${DIGIT}+\\s*階建て`, "g"));      // 例：5階建て
+  addAll(new RegExp(`総戸数\\s*${DIGIT}+\\s*戸`, "g")); // 例：総戸数24戸
+  addAll(new RegExp(`${DIGIT}+\\s*戸`, "g"));          // 単独の「24戸」など
+
+  // 管理会社・会社名（株式会社/（株））
+  addAll(/[（(]?株[）)]?式会社?[^\s、。]+/g);           // 株式会社東京建物アメニティサポート 等
+  addAll(/管理会社[^\s、。]*|管理形態[^\s、。]*|管理方式[^\s、。]*/g);
+
+  // その他の数値＋単位（過度に広げないよう代表例のみに限定）
+  addAll(new RegExp(`${DIGIT}+\\s*年`, "g"));          // 「1998年」等の保険
+  addAll(new RegExp(`${DIGIT}+\\s*分`, "g"));          // 「6分」等の保険
+
+  // 句読点込みで固定したい短い断片を整理
+  const arr = Array.from(anchors).sort((a, b) => b.length - a.length);
+  return arr;
 }
 
-const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const stripWords = (s: string, words: string[]) =>
-  (s || "").replace(new RegExp(`(${words.map(esc).join("|")})`, "g"), "");
-const stripSpaces = (s: string) => (s || "").replace(/\s{2,}/g, " ").trim();
-
-const BANNED = [
-  "完全","完ぺき","絶対","万全","100％","フルリフォーム","理想","日本一","日本初","業界一","超","当社だけ","他に類を見ない",
-  "抜群","一流","秀逸","羨望","屈指","特選","厳選","正統","由緒正しい","地域でナンバーワン","最高","最高級","極","特級",
-  "至便","至近","破格","激安","特安","投売り","バーゲンセール",
-  "お問い合わせ","お問合せ","お気軽に","ぜひ一度ご覧","ご連絡ください","見学予約","内見"
-];
-
+/* ────────────── トーン正規化 ────────────── */
 type Tone = "上品・落ち着いた" | "一般的" | "親しみやすい";
 function normalizeTone(t: any): Tone {
   const v = String(t || "").trim();
@@ -35,90 +51,88 @@ function normalizeTone(t: any): Tone {
   if (v === "一般的") return "一般的";
   return "上品・落ち着いた";
 }
-function styleGuide(tone: Tone) {
-  if (tone === "親しみやすい") return [
-    "文体: 親しみやすい丁寧語。絵文字・過剰な感嘆は使わない。",
-    "構成: ①立地/雰囲気 ②外観/共用 ③アクセス ④日常イメージ ⑤まとめ。",
-    "語尾は「です/ます」で統一。体言止めは2文まで。"
-  ].join("\n");
-  if (tone === "一般的") return [
-    "文体: 中立・説明的。事実ベースで読みやすく。",
-    "構成: ①概要 ②規模/構造 ③アクセス ④共用/管理 ⑤まとめ。",
-    "語尾は「です/ます」で統一。体言止めは2文まで。"
-  ].join("\n");
-  return [
-    "文体: 上品で落ち着いた丁寧語。誇張は避ける。",
-    "構成: ①コンセプト/立地 ②敷地/ランドスケープ ③建築/デザイン ④アクセス ⑤共用/管理 ⑥結び。",
-    "語尾は「です/ます」で統一。体言止めは2文まで。"
-  ].join("\n");
+
+function styleHint(tone: Tone) {
+  if (tone === "親しみやすい") {
+    return "親しみやすい丁寧語に言い換え、語尾をやわらかく。口語っぽさは控えめで、読みやすく。";
+  }
+  if (tone === "一般的") {
+    return "中立・説明的な丁寧語へ調整。冗長表現は軽く整えるが、情報は削らない。";
+  }
+  return "上品で落ち着いた筆致へ整える。語彙は端正・過度な誇張は避ける。";
 }
 
-/* ------------ main handler ------------ */
+/* ────────────── OpenAI ────────────── */
+function openai() {
+  return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+}
+
+/**
+ * 仕上げ（Polish）
+ * - 事実（アンカー）は厳守して変更禁止
+ * - 文の削除/追加は禁止（句読点の微調整は可）
+ * - 各文で最低1か所は言い換え/語順調整などを行い、言い回しを多様化
+ */
+async function polishWithTone(text: string, tone: Tone) {
+  const anchors = extractAnchors(text);
+
+  const sys =
+    'Return ONLY {"text": string}. (json)\n' +
+    [
+      "あなたは日本語の編集者です。次の”本文”の**内容は変えず**、指定のトーンに沿って言い回しを整えます。",
+      "厳守事項：",
+      "1) アンカー（後述の anchor_phrases に列挙）を**一字一句**変更しない（数字/駅名/会社名/構造/『徒歩約～分』等）。",
+      "2) 文の**削除・追加は禁止**（改行や句読点の調整は可）。",
+      "3) 各文ごとに**最低1か所**は言い換え/語順入替/接続詞調整を行い、言い回しを多様化。",
+      "4) 誇張・勧誘（お問い合わせ/ぜひご覧等）は挿入しない。",
+      `トーン指示：${styleHint(tone)}`,
+    ].join("\n");
+
+  const res = await openai().chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.2,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: sys },
+      {
+        role: "user",
+        content: JSON.stringify({
+          body: text,
+          tone,
+          anchor_phrases: anchors,
+        }),
+      },
+    ],
+  });
+
+  try {
+    const out = JSON.parse(res.choices?.[0]?.message?.content || "{}")?.text;
+    return typeof out === "string" && out.trim() ? out.trim() : text;
+  } catch {
+    return text;
+  }
+}
+
+/* ────────────── handler ────────────── */
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    let {
-      text = "",
-      tone = "上品・落ち着いた",
-      minChars = 450,
-      maxChars = 550,
-      diversify = true,       // 言い回しを少し多様化
-    } = body || {};
-
-    tone = normalizeTone(tone);
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const STYLE = styleGuide(tone);
-
-    // 事前クリーン（禁止語の保険）
-    let out = stripSpaces(stripWords(text, BANNED));
-
-    // 規定文字数を下回る場合は、事実を変えずに安全に「広げる」
-    if (countJa(out) < minChars) {
-      const r = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        temperature: diversify ? 0.4 : 0.1,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              'Return ONLY {"text": string, "notes": string[]}. (json)\n' +
-              `日本語・トーン:${tone}。次のスタイルガイドを厳守：\n${STYLE}\n` +
-              `目的: 与えられた本文の**事実を変えず**に、説明を補いながら${minChars}〜${maxChars}字に拡張する。\n` +
-              "価格/金額/電話/URL/勧誘表現は禁止。部屋の向きや面積など室内の個別属性は追加しない。"
-          },
-          { role: "user", content: JSON.stringify({ base: out, range: { min: minChars, max: maxChars } }) }
-        ]
+    const { text = "", tone = "上品・落ち着いた" } = body || {};
+    if (!text) {
+      return new Response(JSON.stringify({ ok: false, error: "text は必須です", polished: "" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
       });
-      try {
-        const j = JSON.parse(r.choices?.[0]?.message?.content || "{}");
-        if (typeof j?.text === "string" && j.text.trim()) out = j.text;
-      } catch { /* keep out */ }
     }
-
-    // 最終クリーンアップ＆上限カット
-    out = stripSpaces(stripWords(out, BANNED));
-    if (countJa(out) > maxChars) out = hardCapJa(out, maxChars);
-
-    const notes: string[] = [];
-    if (countJa(text) < minChars && countJa(out) >= minChars) {
-      notes.push("不足文字数を補い、読みやすく整えました。");
-    } else {
-      notes.push("語尾/文流れを整えました。");
-    }
-
-    return new Response(JSON.stringify({
-      ok: true,
-      text: out,
-      notes,
-      applied: true
-    }), { status: 200, headers: { "content-type": "application/json" } });
-
-  } catch (e: any) {
-    // 失敗してもUIが落ちないように必ずJSONで返す
-    return new Response(JSON.stringify({ ok: false, text: "", notes: [], error: e?.message || "server error" }), {
+    const polished = await polishWithTone(text, normalizeTone(tone));
+    return new Response(JSON.stringify({ ok: true, polished }), {
       status: 200,
-      headers: { "content-type": "application/json" }
+      headers: { "content-type": "application/json" },
+    });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ ok: false, error: e?.message || "server error", polished: "" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
     });
   }
 }
