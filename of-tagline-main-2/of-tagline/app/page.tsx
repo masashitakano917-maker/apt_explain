@@ -29,7 +29,7 @@ function markDiffRed(original: string, improved: string) {
   return out.join("");
 }
 
-/* ========= SAFE fetch wrappers（白画面防止） ========= */
+/* ========= SAFE fetch wrappers ========= */
 async function safeJson<T = any>(input: RequestInfo, init?: RequestInit): Promise<T | null> {
   try {
     const res = await fetch(input, init);
@@ -64,16 +64,10 @@ async function callReview(draftText: string, facts?: {
   maintFeeNote?: string;
 }) {
   const j = await safeJson<{
-    ok?: boolean;
     improved?: string;
     text_after_check?: string;
     issues?: ReviewIssue[];
-    text_after_polish?: string;
-    auto_fixed?: boolean;
-    polish_applied?: boolean;
-    polish_notes?: string[];
     summary?: string;
-    error?: string;
   }>("/api/review", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -86,14 +80,18 @@ async function callReview(draftText: string, facts?: {
     (draftText ?? "");
 
   const issues = Array.isArray(j?.issues) ? j!.issues : [];
+  return { improved, issues, summary: j?.summary || "" };
+}
+
+async function callPolish(text: string, tone: string, minChars: number, maxChars: number) {
+  const j = await safeJson<{ ok?: boolean; text?: string; notes?: string[] }>("/api/polish", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text, tone, minChars, maxChars }),
+  });
   return {
-    improved,
-    issues,
-    text_after_polish: typeof j?.text_after_polish === "string" ? j!.text_after_polish : "",
-    auto_fixed: Boolean(j?.auto_fixed),
-    polish_applied: Boolean(j?.polish_applied),
-    polish_notes: Array.isArray(j?.polish_notes) ? j!.polish_notes! : [],
-    summary: j?.summary || "",
+    text: (j?.text && typeof j.text === "string") ? j.text : text,
+    notes: Array.isArray(j?.notes) ? j!.notes! : []
   };
 }
 
@@ -171,74 +169,63 @@ export default function Page() {
   const [minChars, setMinChars] = useState(450);
   const [maxChars, setMaxChars] = useState(550);
 
-  // 追加：基本情報（facts, 任意）
+  // 追加：基本情報（任意：/api/review の facts 用）
   const [units, setUnits] = useState<string>("");
-  const [structure, setStructure] = useState<string>(""); // RC / SRC / 鉄筋コンクリート造 など
-  const [built, setBuilt] = useState<string>("");         // 例: 1984年10月築
-  const [management, setManagement] = useState<string>(""); // 例: 管理会社に全部委託・巡回
+  const [structure, setStructure] = useState<string>("");
+  const [built, setBuilt] = useState<string>("");
+  const [management, setManagement] = useState<string>("");
   const [maintFeeNote, setMaintFeeNote] = useState<string>("");
 
-  // 生成・通信状態
+  // 状態
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 出力①②③
-  const [text1, setText1] = useState(""); // ドラフト
-  const [text2, setText2] = useState(""); // 安全チェック済
-  const [text3, setText3] = useState(""); // 仕上げ提案（採用時優先表示）
+  // 出力
+  const [text1, setText1] = useState("");
+  const [text2, setText2] = useState("");
+  const [text3, setText3] = useState("");
 
   // 差分
   const [diff12Html, setDiff12Html] = useState("");
   const [diff23Html, setDiff23Html] = useState("");
 
-  // チェック結果（左ペイン相当）
-  const [issues2, setIssues2] = useState<{ sentence: string; reasons: { id: string; label: string }[] }[]>([]);
+  // チェック結果
+  const [issues2, setIssues2] = useState<ReviewIssue[]>([]);
   const [summary2, setSummary2] = useState("");
 
-  // Polishのメモとフラグ
+  // Polishメモ
   const [polishNotes, setPolishNotes] = useState<string[]>([]);
-  const [autoFixed, setAutoFixed] = useState(false);
-  const [polishApplied, setPolishApplied] = useState(false);
 
-  // 自動チェックのステータス
+  // ステップ／ステータス
   const [checkStatus, setCheckStatus] = useState<CheckStatus>("idle");
-
-  // ===== Tracker の状態 =====
   const [draftStep, setDraftStep] = useState<StepState>("idle");
   const [checkStep, setCheckStep] = useState<StepState>("idle");
   const [polishStep, setPolishStep] = useState<StepState>("idle");
 
-  // ====== 自動スクロールのための参照 ======
+  // スクロール参照
   const draftRef = useRef<HTMLDivElement | null>(null);
   const checkRef = useRef<HTMLDivElement | null>(null);
   const polishRef = useRef<HTMLDivElement | null>(null);
-
   const scrollTo = (key: StepKey) => {
     const map: Record<StepKey, HTMLDivElement | null> = {
-      draft: draftRef.current,
-      check: checkRef.current,
-      polish: polishRef.current,
+      draft: draftRef.current, check: checkRef.current, polish: polishRef.current,
     } as any;
-    const el = map[key];
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    const el = map[key]; if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
   const validUrl = (s: string) => /^https?:\/\/\S+/i.test(String(s || "").trim());
   const currentText = text3 || text2 || text1;
 
-  /* ------------ 生成（完了後に自動チェックを実行） ------------ */
+  /* 生成 */
   async function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
 
-    // リセット
+    // reset
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
-    setIssues2([]); setSummary2("");
-    setPolishNotes([]); setAutoFixed(false); setPolishApplied(false);
+    setIssues2([]); setSummary2(""); setPolishNotes([]);
     setCheckStatus("idle");
-
-    // tracker リセット
     setDraftStep("idle"); setCheckStep("idle"); setPolishStep("idle");
 
     try {
@@ -247,22 +234,15 @@ export default function Page() {
       if (minChars > maxChars) throw new Error("最小文字数は最大文字数以下にしてください。");
 
       setBusy(true);
-
-      // Draft: start
       setDraftStep("active");
 
-      // ① 初回生成（安全ラッパー）
-      const generated = await callDescribe({
-        name, url, mustWords: mustInput, tone, minChars, maxChars,
-      });
+      const generated = await callDescribe({ name, url, mustWords: mustInput, tone, minChars, maxChars });
       setText1(generated || "");
 
-      // Draft: done
       setDraftStep("done");
       setTimeout(() => scrollTo("draft"), 0);
 
-      // ②（→③まで）自動チェック
-      await handleCheck(generated, /*suppressBusy*/ true);
+      await handleCheck(generated, true);
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
       setCheckStatus("error");
@@ -272,61 +252,46 @@ export default function Page() {
     }
   }
 
-  /* ------------ チェック（Describeとは独立に安全実行） ------------ */
+  /* チェック → ポリッシュ */
   async function handleCheck(baseText?: string, suppressBusy = false) {
     try {
       const src = (baseText ?? text1).trim();
       if (!src) throw new Error("まずドラフトを生成してください。");
       if (!suppressBusy) setBusy(true);
 
-      // Check: start
-      setCheckStep("active");
-      setPolishStep("idle");
-
+      setCheckStep("active"); setPolishStep("idle");
       setCheckStatus("running");
-      setIssues2([]); setSummary2(""); setDiff12Html(""); setDiff23Html("");
-      setPolishNotes([]); setPolishApplied(false); setAutoFixed(false);
+      setIssues2([]); setSummary2(""); setDiff12Html(""); setDiff23Html(""); setPolishNotes([]);
 
-      // facts（任意入力を渡す）
-      const factsPayload: any = {};
-      if (units) factsPayload.units = units;
-      if (structure) factsPayload.structure = structure;
-      if (built) factsPayload.built = built;
-      if (management) factsPayload.management = management;
-      if (maintFeeNote) factsPayload.maintFeeNote = maintFeeNote;
+      const facts: any = {};
+      if (units) facts.units = units;
+      if (structure) facts.structure = structure;
+      if (built) facts.built = built;
+      if (management) facts.management = management;
+      if (maintFeeNote) facts.maintFeeNote = maintFeeNote;
 
-      const r = await callReview(src, factsPayload);
-
-      // ② 安全チェック済
+      // ② review
+      const r = await callReview(src, facts);
       const afterCheck = r.improved || src;
       setText2(afterCheck);
-
-      // 左ペイン：削除文と理由
       setIssues2(r.issues || []);
       setSummary2(r.summary || "");
 
-      // Check: done & スクロール
       setCheckStep("done");
       setTimeout(() => scrollTo("check"), 0);
 
-      // ③ 仕上げ（採用時のみ反映）
+      // ③ polish（不足文字数があればここで増量）
       setPolishStep("active");
-      const afterPolish = r.text_after_polish || "";
-      setText3(afterPolish);
+      const p = await callPolish(afterCheck, String(tone), minChars, maxChars);
+      setText3(p.text || "");
+      setPolishNotes(p.notes || []);
+      setPolishStep("done");
 
       // 差分
       setDiff12Html(markDiffRed(src, afterCheck));
-      setDiff23Html(afterPolish ? markDiffRed(afterCheck, afterPolish) : "");
+      setDiff23Html(markDiffRed(afterCheck, p.text || afterCheck));
 
-      // フラグとメモ
-      setAutoFixed(Boolean(r.auto_fixed));
-      setPolishApplied(Boolean(r.polish_applied));
-      setPolishNotes(r.polish_notes || []);
-
-      // Polish: done/idle & スクロール
-      setPolishStep(r.polish_applied ? "done" : "idle");
-      if (r.polish_applied) setTimeout(() => scrollTo("polish"), 0);
-
+      setTimeout(() => scrollTo("polish"), 0);
       setCheckStatus("done");
     } catch (err: any) {
       setError(err?.message || "エラーが発生しました。");
@@ -345,8 +310,7 @@ export default function Page() {
     setUnits(""); setStructure(""); setBuilt(""); setManagement(""); setMaintFeeNote("");
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
-    setIssues2([]); setSummary2("");
-    setPolishNotes([]); setPolishApplied(false); setAutoFixed(false);
+    setIssues2([]); setSummary2(""); setPolishNotes([]);
     setError(null);
     setCheckStatus("idle");
     setDraftStep("idle"); setCheckStep("idle"); setPolishStep("idle");
@@ -386,45 +350,26 @@ export default function Page() {
             <div className="grid gap-3">
               <label className="flex flex-col gap-1">
                 <span className="text-sm font-medium">物件名</span>
-                <input
-                  className="border rounded-lg p-2"
-                  placeholder="例）パークタワー晴海"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                />
+                <input className="border rounded-lg p-2" placeholder="例）パークタワー晴海" value={name} onChange={(e) => setName(e.target.value)} />
               </label>
 
               <label className="flex flex-col gap-1">
                 <span className="text-sm font-medium">物件URL</span>
-                <input
-                  className="border rounded-lg p-2"
-                  placeholder="例）https://www.rehouse.co.jp/buy/mansion/..."
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                />
-                {!url || validUrl(url) ? null : (
-                  <span className="text-xs text-red-600">URLの形式が正しくありません。</span>
-                )}
+                <input className="border rounded-lg p-2" placeholder="例）https://www.rehouse.co.jp/buy/mansion/..." value={url} onChange={(e) => setUrl(e.target.value)} />
+                {!url || /^https?:\/\/\S+/i.test(url) ? null : <span className="text-xs text-red-600">URLの形式が正しくありません。</span>}
               </label>
 
               <label className="flex flex-col gap-1">
                 <span className="text-sm font-medium">マストワード</span>
-                <textarea
-                  className="border rounded-lg p-2 min-h-[84px]"
+                <textarea className="border rounded-lg p-2 min-h-[84px]"
                   placeholder="例）駅徒歩3分 ラウンジ ペット可 など（空白/改行/カンマ区切り）"
-                  value={mustInput}
-                  onChange={(e) => setMustInput(e.target.value)}
-                />
+                  value={mustInput} onChange={(e) => setMustInput(e.target.value)} />
                 <span className="text-xs text-neutral-500">認識語数：{mustWords.length}</span>
               </label>
 
               <label className="flex flex-col gap-1">
                 <span className="text-sm font-medium">トーン</span>
-                <select
-                  className="border rounded-lg p-2"
-                  value={tone}
-                  onChange={(e) => setTone(e.target.value as Tone)}
-                >
+                <select className="border rounded-lg p-2" value={tone} onChange={(e) => setTone(e.target.value as Tone)}>
                   {tones.map((t) => <option key={t} value={t}>{t}</option>)}
                 </select>
               </label>
@@ -432,67 +377,48 @@ export default function Page() {
               <div className="grid grid-cols-2 gap-3">
                 <label className="flex flex-col gap-1">
                   <span className="text-sm font-medium">最小文字数（全角）</span>
-                  <input
-                    type="number"
-                    className="border rounded-lg p-2"
-                    value={minChars}
-                    min={200}
-                    max={2000}
-                    onChange={(e) => setMinChars(clamp(Number(e.target.value || 450), 200, 2000))}
-                  />
+                  <input type="number" className="border rounded-lg p-2" value={minChars} min={200} max={2000}
+                    onChange={(e) => setMinChars(clamp(Number(e.target.value || 450), 200, 2000))} />
                 </label>
                 <label className="flex flex-col gap-1">
                   <span className="text-sm font-medium">最大文字数（全角）</span>
-                  <input
-                    type="number"
-                    className="border rounded-lg p-2"
-                    value={maxChars}
-                    min={200}
-                    max={2000}
-                    onChange={(e) => setMaxChars(clamp(Number(e.target.value || 550), 200, 2000))}
-                  />
+                  <input type="number" className="border rounded-lg p-2" value={maxChars} min={200} max={2000}
+                    onChange={(e) => setMaxChars(clamp(Number(e.target.value || 550), 200, 2000))} />
                 </label>
                 <div className="col-span-2 text-xs text-neutral-500">
                   推奨：450〜550　|　現在：{minChars}〜{maxChars}　|　最新本文長：{jaLen(currentText)} 文字
                 </div>
               </div>
 
-              {/* 新規：基本情報（任意、/api/review の facts へ） */}
+              {/* facts（任意） */}
               <details className="rounded-lg border bg-neutral-50 p-3">
-                <summary className="cursor-pointer text-sm font-medium">基本情報（任意・本文に無い場合だけ末尾に自動補足）</summary>
+                <summary className="cursor-pointer text-sm font-medium">基本情報（任意・本文に無い場合のみ自動補足）</summary>
                 <div className="grid grid-cols-2 gap-3 mt-3">
                   <label className="flex flex-col gap-1">
                     <span className="text-xs text-neutral-600">総戸数</span>
-                    <input className="border rounded p-2" placeholder="例）19"
-                      value={units} onChange={(e)=>setUnits(e.target.value)} />
+                    <input className="border rounded p-2" placeholder="例）33" value={units} onChange={(e)=>setUnits(e.target.value)} />
                   </label>
                   <label className="flex flex-col gap-1">
-                    <span className="text-xs text-neutral-600">構造（RC/SRC/鉄筋コンクリート造など）</span>
-                    <input className="border rounded p-2" placeholder="例）RC"
-                      value={structure} onChange={(e)=>setStructure(e.target.value)} />
+                    <span className="text-xs text-neutral-600">構造（RC/SRC など）</span>
+                    <input className="border rounded p-2" placeholder="例）RC" value={structure} onChange={(e)=>setStructure(e.target.value)} />
                   </label>
                   <label className="flex flex-col gap-1">
                     <span className="text-xs text-neutral-600">築年</span>
-                    <input className="border rounded p-2" placeholder="例）1984年10月築"
-                      value={built} onChange={(e)=>setBuilt(e.target.value)} />
+                    <input className="border rounded p-2" placeholder="例）1998年築" value={built} onChange={(e)=>setBuilt(e.target.value)} />
                   </label>
                   <label className="flex flex-col gap-1">
                     <span className="text-xs text-neutral-600">管理体制</span>
-                    <input className="border rounded p-2" placeholder="例）管理会社に全部委託・巡回"
-                      value={management} onChange={(e)=>setManagement(e.target.value)} />
+                    <input className="border rounded p-2" placeholder="例）管理会社に全部委託・日勤" value={management} onChange={(e)=>setManagement(e.target.value)} />
                   </label>
                   <label className="flex flex-col gap-1 col-span-2">
                     <span className="text-xs text-neutral-600">管理に関する補足（任意）</span>
-                    <input className="border rounded p-2" placeholder="例）長期修繕計画あり（任意）"
-                      value={maintFeeNote} onChange={(e)=>setMaintFeeNote(e.target.value)} />
+                    <input className="border rounded p-2" placeholder="例）長期修繕計画あり" value={maintFeeNote} onChange={(e)=>setMaintFeeNote(e.target.value)} />
                   </label>
                 </div>
               </details>
 
               <div className="flex gap-3">
-                <Button type="submit" disabled={busy || !name || !url}>
-                  {busy && checkStatus !== "running" ? "処理中…" : "文章を生成"}
-                </Button>
+                <Button type="submit" disabled={busy || !name || !url}>{busy && checkStatus !== "running" ? "処理中…" : "文章を生成"}</Button>
                 <Button type="button" color="orange" onClick={handleReset}>リセット</Button>
               </div>
 
@@ -500,27 +426,25 @@ export default function Page() {
             </div>
           </section>
 
-          {/* 左：チェック可視化（ステータス／差分／要点） */}
+          {/* 左：チェック可視化 */}
           <section className="bg-white rounded-2xl shadow p-4 space-y-3">
             <div className="text-sm font-medium">チェック &amp; 仕上げの結果</div>
 
-            {/* 1行：自動チェックのステータス＋再実行 */}
             <div className="flex items-center justify-between rounded-xl border bg-neutral-50 px-3 py-2">
               <div className="text-sm">自動チェック（ドラフト生成後に自動実行）</div>
               <div className="flex items-center gap-2">
-                <span className={cn("px-2 py-0.5 rounded-full text-xs", statusClass)}>{statusLabel}</span>
-                <Button
-                  type="button"
-                  onClick={() => handleCheck()}
-                  disabled={busy || !text1}
-                  className="px-3 py-1 text-xs"
-                >
-                  再実行
-                </Button>
+                <span className={cn("px-2 py-0.5 rounded-full text-xs", 
+                  checkStatus==="running"?"bg-yellow-100 text-yellow-700":
+                  checkStatus==="done"?"bg-emerald-100 text-emerald-700":
+                  checkStatus==="error"?"bg-red-100 text-red-700":"bg-neutral-100 text-neutral-600"
+                )}>
+                  {checkStatus==="running"?"実行中…":checkStatus==="done"?"完了":checkStatus==="error"?"エラー":"未実行"}
+                </span>
+                <Button type="button" onClick={() => handleCheck()} disabled={busy || !text1} className="px-3 py-1 text-xs">再実行</Button>
               </div>
             </div>
 
-            {/* 要点（削除文の詳細） */}
+            {/* 削除文と理由 */}
             {issues2.length > 0 && (
               <div className="space-y-2">
                 {issues2.map((it, i) => (
@@ -536,25 +460,18 @@ export default function Page() {
               </div>
             )}
 
-            {/* 差分 ①→② / ②→③ */}
             {(diff12Html || diff23Html) && (
               <div className="space-y-3">
                 {!!diff12Html && (
                   <details open className="rounded border">
                     <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分（ドラフト → 安全チェック済）</summary>
-                    <div
-                      className="p-3 text-sm leading-relaxed"
-                      dangerouslySetInnerHTML={{ __html: diff12Html }}
-                    />
+                    <div className="p-3 text-sm leading-relaxed" dangerouslySetInnerHTML={{ __html: diff12Html }} />
                   </details>
                 )}
                 {!!diff23Html && (
                   <details className="rounded border">
                     <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分（安全チェック済 → 仕上げ提案）</summary>
-                    <div
-                      className="p-3 text-sm leading-relaxed"
-                      dangerouslySetInnerHTML={{ __html: diff23Html }}
-                    />
+                    <div className="p-3 text-sm leading-relaxed" dangerouslySetInnerHTML={{ __html: diff23Html }} />
                   </details>
                 )}
               </div>
@@ -562,10 +479,16 @@ export default function Page() {
           </section>
         </form>
 
-        {/* 右カラム：トラッカー＋3出力 */}
+        {/* 右カラム：出力3段 */}
         <section className="space-y-4">
-          {/* 進捗トラッカー（クリックでスクロール） */}
-          <StepTrack steps={stepsForTracker} onStepClick={scrollTo} />
+          <StepTrack steps={[
+            { key: "draft" as StepKey,  label: "ドラフト",     sub: draftStep==="active"?"作成中":draftStep==="done"?"完了":"", state: draftStep },
+            { key: "check" as StepKey,  label: "安全チェック", sub: checkStep==="active"?"実行中":checkStep==="done"?"完了":"", state: checkStep },
+            { key: "polish" as StepKey, label: "仕上げ提案",   sub: polishStep==="active"?"生成中":polishStep==="done"?"完了":"", state: polishStep },
+          ]} onStepClick={(k)=> {
+            const map: any = { draft: draftRef.current, check: checkRef.current, polish: polishRef.current };
+            const el = map[k]; if (el) el.scrollIntoView({ behavior:"smooth", block:"start" });
+          }} />
 
           {/* ドラフト */}
           <div ref={draftRef} className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden scroll-mt-24">
@@ -573,62 +496,38 @@ export default function Page() {
               <div className="text-sm font-medium">ドラフト</div>
               <div className="flex items-center gap-3">
                 <div className="text-xs text-neutral-500">長さ：{jaLen(text1)} 文字</div>
-                <Button onClick={() => copy(text1)} disabled={!text1}>コピー</Button>
+                <Button onClick={() => navigator.clipboard.writeText(text1)} disabled={!text1}>コピー</Button>
               </div>
             </div>
             <div className="p-4 flex-1 overflow-auto">
-              {text1 ? (
-                <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text1}</p>
-              ) : (
-                <div className="text-neutral-500 text-sm">— 未生成 —</div>
-              )}
+              {text1 ? <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text1}</p> : <div className="text-neutral-500 text-sm">— 未生成 —</div>}
             </div>
           </div>
 
           {/* 安全チェック済 */}
           <div ref={checkRef} className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden scroll-mt-24">
             <div className="p-4 border-b flex items-center justify-between">
-              <div className="text-sm font-medium flex items-center gap-2">
-                安全チェック済
-                {autoFixed ? (
-                  <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">自動修正適用</span>
-                ) : (
-                  <span className="text-xs bg-neutral-100 text-neutral-600 px-2 py-0.5 rounded">修正なし</span>
-                )}
-              </div>
+              <div className="text-sm font-medium">安全チェック済</div>
               <div className="flex items-center gap-3">
                 <div className="text-xs text-neutral-500">長さ：{jaLen(text2)} 文字</div>
-                <Button onClick={() => copy(text2)} disabled={!text2}>コピー</Button>
+                <Button onClick={() => navigator.clipboard.writeText(text2)} disabled={!text2}>コピー</Button>
               </div>
             </div>
-            <div className="p-4 flex-1 overflow-auto space-y-3">
-              {text2 ? (
-                <>
-                  <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text2}</p>
-                </>
-              ) : (
-                <div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>
-              )}
+            <div className="p-4 flex-1 overflow-auto">
+              {text2 ? <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text2}</p> : <div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>}
             </div>
           </div>
 
-          {/* 仕上げ提案（Polish） */}
+          {/* 仕上げ提案 */}
           <div ref={polishRef} className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden scroll-mt-24">
             <div className="p-4 border-b flex items-center justify-between">
-              <div className="text-sm font-medium flex items-center gap-2">
-                仕上げ提案（Polish）
-                {polishApplied ? (
-                  <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">適用</span>
-                ) : (
-                  <span className="text-xs bg-neutral-100 text-neutral-600 px-2 py-0.5 rounded">未適用</span>
-                )}
-              </div>
+              <div className="text-sm font-medium">仕上げ提案（Polish）</div>
               <div className="flex items-center gap-3">
                 <div className="text-xs text-neutral-500">長さ：{jaLen(text3 || text2)} 文字</div>
-                <Button onClick={() => copy(text3 || text2)} disabled={!(text3 || text2)}>コピー</Button>
+                <Button onClick={() => navigator.clipboard.writeText(text3 || text2)} disabled={!(text3 || text2)}>コピー</Button>
               </div>
             </div>
-            <div className="p-4 flex-1 overflow-auto space-y-3">
+            <div className="p-4 flex-1 overflow-auto space-y-2">
               {text3 || text2 ? (
                 <>
                   <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text3 || text2}</p>
@@ -646,8 +545,8 @@ export default function Page() {
 
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
-              ※ ドラフトは <code>/api/describe</code>、安全チェック/仕上げは <code>/api/review</code> を利用。<br/>
-              ここでは API 応答の想定外パターンでも例外で落ちないよう、すべて安全化しています。
+              ※ ドラフトは <code>/api/describe</code>、安全チェックは <code>/api/review</code>、仕上げは <code>/api/polish</code> を使用。<br/>
+              仕上げでは不足文字数を補い、トーン/文流れを整えます。
             </div>
           </div>
         </section>
