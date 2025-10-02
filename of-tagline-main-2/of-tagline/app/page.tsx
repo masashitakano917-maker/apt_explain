@@ -56,17 +56,21 @@ async function callDescribe(payload: {
 }
 
 type ReviewIssue = { sentence: string; reasons: { id: string; label: string }[] };
-async function callReview(draftText: string, facts?: {
-  units?: number | string;
-  structure?: string;
-  built?: string;
-  management?: string;
-  maintFeeNote?: string;
-}) {
+async function callReview(
+  draftText: string,
+  facts?: {
+    units?: number | string;
+    structure?: string;
+    built?: string;
+    management?: string;
+    maintFeeNote?: string;
+  }
+) {
   const j = await safeJson<{
     improved?: string;
     text_after_check?: string;
     issues?: ReviewIssue[];
+    issues_structured?: ReviewIssue[];
     summary?: string;
   }>("/api/review", {
     method: "POST",
@@ -79,8 +83,12 @@ async function callReview(draftText: string, facts?: {
     (j?.text_after_check && typeof j.text_after_check === "string" && j.text_after_check.trim()) ||
     (draftText ?? "");
 
-  const issues = Array.isArray(j?.issues) ? j!.issues : [];
-  return { improved, issues, summary: j?.summary || "" };
+  const issuesArr =
+    (Array.isArray(j?.issues_structured) ? j?.issues_structured :
+    (Array.isArray(j?.issues) ? j?.issues : [])) as ReviewIssue[];
+
+  const summary = j?.summary || "";
+  return { improved, issues: issuesArr, summary };
 }
 
 async function callPolish(text: string, tone: string, minChars: number, maxChars: number) {
@@ -89,10 +97,9 @@ async function callPolish(text: string, tone: string, minChars: number, maxChars
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ text, tone, minChars, maxChars }),
   });
-  return {
-    text: (j?.text && typeof j.text === "string") ? j.text : text,
-    notes: Array.isArray(j?.notes) ? j!.notes! : []
-  };
+  const polished = (j?.text && typeof j.text === "string") ? j.text : text;
+  const notes = Array.isArray(j?.notes) ? j!.notes! : [];
+  return { text: polished, notes, changed: polished.trim() !== text.trim() };
 }
 
 /* ========= Tracker UI ========= */
@@ -193,8 +200,9 @@ export default function Page() {
   const [issues2, setIssues2] = useState<ReviewIssue[]>([]);
   const [summary2, setSummary2] = useState("");
 
-  // Polishメモ
+  // Polishメモ・適用フラグ
   const [polishNotes, setPolishNotes] = useState<string[]>([]);
+  const [polishApplied, setPolishApplied] = useState<boolean>(false);
 
   // ステップ／ステータス
   const [checkStatus, setCheckStatus] = useState<CheckStatus>("idle");
@@ -224,7 +232,7 @@ export default function Page() {
     // reset
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
-    setIssues2([]); setSummary2(""); setPolishNotes([]);
+    setIssues2([]); setSummary2(""); setPolishNotes([]); setPolishApplied(false);
     setCheckStatus("idle");
     setDraftStep("idle"); setCheckStep("idle"); setPolishStep("idle");
 
@@ -261,7 +269,7 @@ export default function Page() {
 
       setCheckStep("active"); setPolishStep("idle");
       setCheckStatus("running");
-      setIssues2([]); setSummary2(""); setDiff12Html(""); setDiff23Html(""); setPolishNotes([]);
+      setIssues2([]); setSummary2(""); setDiff12Html(""); setDiff23Html(""); setPolishNotes([]); setPolishApplied(false);
 
       const facts: any = {};
       if (units) facts.units = units;
@@ -280,11 +288,12 @@ export default function Page() {
       setCheckStep("done");
       setTimeout(() => scrollTo("check"), 0);
 
-      // ③ polish（不足文字数があればここで増量）
+      // ③ polish（不足文字数があればここで増量＋トーン言い換え）
       setPolishStep("active");
       const p = await callPolish(afterCheck, String(tone), minChars, maxChars);
       setText3(p.text || "");
       setPolishNotes(p.notes || []);
+      setPolishApplied(!!p.changed);
       setPolishStep("done");
 
       // 差分
@@ -310,7 +319,7 @@ export default function Page() {
     setUnits(""); setStructure(""); setBuilt(""); setManagement(""); setMaintFeeNote("");
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
-    setIssues2([]); setSummary2(""); setPolishNotes([]);
+    setIssues2([]); setSummary2(""); setPolishNotes([]); setPolishApplied(false);
     setError(null);
     setCheckStatus("idle");
     setDraftStep("idle"); setCheckStep("idle"); setPolishStep("idle");
@@ -404,11 +413,11 @@ export default function Page() {
                   </label>
                   <label className="flex flex-col gap-1">
                     <span className="text-xs text-neutral-600">築年</span>
-                    <input className="border rounded p-2" placeholder="例）1998年築" value={built} onChange={(e)=>setBuilt(e.target.value)} />
+                    <input className="border rounded p-2" placeholder="例）1998年築 / 1998年10月築" value={built} onChange={(e)=>setBuilt(e.target.value)} />
                   </label>
                   <label className="flex flex-col gap-1">
                     <span className="text-xs text-neutral-600">管理体制</span>
-                    <input className="border rounded p-2" placeholder="例）管理会社に全部委託・日勤" value={management} onChange={(e)=>setManagement(e.target.value)} />
+                    <input className="border rounded p-2" placeholder="例）管理会社に全部委託・日勤／巡回" value={management} onChange={(e)=>setManagement(e.target.value)} />
                   </label>
                   <label className="flex flex-col gap-1 col-span-2">
                     <span className="text-xs text-neutral-600">管理に関する補足（任意）</span>
@@ -456,8 +465,12 @@ export default function Page() {
                     </ul>
                   </div>
                 ))}
-                {!!summary2 && <div className="text-xs text-neutral-500">要約: {summary2}</div>}
               </div>
+            )}
+
+            {/* 要点の要約（削除文が無くても表示） */}
+            {!!summary2 && (
+              <div className="text-xs text-neutral-500">要約: {summary2}</div>
             )}
 
             {(diff12Html || diff23Html) && (
@@ -481,14 +494,17 @@ export default function Page() {
 
         {/* 右カラム：出力3段 */}
         <section className="space-y-4">
-          <StepTrack steps={[
-            { key: "draft" as StepKey,  label: "ドラフト",     sub: draftStep==="active"?"作成中":draftStep==="done"?"完了":"", state: draftStep },
-            { key: "check" as StepKey,  label: "安全チェック", sub: checkStep==="active"?"実行中":checkStep==="done"?"完了":"", state: checkStep },
-            { key: "polish" as StepKey, label: "仕上げ提案",   sub: polishStep==="active"?"生成中":polishStep==="done"?"完了":"", state: polishStep },
-          ]} onStepClick={(k)=> {
-            const map: any = { draft: draftRef.current, check: checkRef.current, polish: polishRef.current };
-            const el = map[k]; if (el) el.scrollIntoView({ behavior:"smooth", block:"start" });
-          }} />
+          <StepTrack
+            steps={[
+              { key: "draft" as StepKey,  label: "ドラフト",     sub: draftStep==="active"?"作成中":draftStep==="done"?"完了":"", state: draftStep },
+              { key: "check" as StepKey,  label: "安全チェック", sub: checkStep==="active"?"実行中":checkStep==="done"?"完了":"", state: checkStep },
+              { key: "polish" as StepKey, label: "仕上げ提案",   sub: polishStep==="active"?"生成中":polishStep==="done"?"完了":"", state: polishStep },
+            ]}
+            onStepClick={(k)=> {
+              const map: any = { draft: draftRef.current, check: checkRef.current, polish: polishRef.current };
+              const el = map[k]; if (el) el.scrollIntoView({ behavior:"smooth", block:"start" });
+            }}
+          />
 
           {/* ドラフト */}
           <div ref={draftRef} className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden scroll-mt-24">
@@ -521,7 +537,14 @@ export default function Page() {
           {/* 仕上げ提案 */}
           <div ref={polishRef} className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden scroll-mt-24">
             <div className="p-4 border-b flex items-center justify-between">
-              <div className="text-sm font-medium">仕上げ提案（Polish）</div>
+              <div className="text-sm font-medium flex items-center gap-2">
+                仕上げ提案（Polish）
+                {polishApplied ? (
+                  <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded">適用</span>
+                ) : (
+                  <span className="text-xs bg-neutral-100 text-neutral-600 px-2 py-0.5 rounded">未適用</span>
+                )}
+              </div>
               <div className="flex items-center gap-3">
                 <div className="text-xs text-neutral-500">長さ：{jaLen(text3 || text2)} 文字</div>
                 <Button onClick={() => navigator.clipboard.writeText(text3 || text2)} disabled={!(text3 || text2)}>コピー</Button>
