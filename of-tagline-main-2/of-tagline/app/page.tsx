@@ -707,11 +707,6 @@ export default function Page() {
             )}
           </section>
 
-          {/* 左：言い換えサジェスト */}
-          // 省略: 上部はあなたの最新版 page.tsx と同じ（imports, utils, fetchers, component, state, handlers など）
-
-// …中略…
-
           {/* 左：言い換えサジェスト（折りたたみ + 12件制限） */}
           <section className="bg-white rounded-2xl shadow p-4 space-y-2">
             <div className="text-sm font-medium">言い換えサジェスト</div>
@@ -721,11 +716,9 @@ export default function Page() {
               maxPhrases={12}
             />
             <div className="text-[11px] text-neutral-500">
-              サマリーに「どのテーマが本文のどの表現に当たったか」を表示します。開くと候補が最大12件まで並びます。
+              本文内にある表現で言い換え可能な箇所が表示されます。開くと言い換え表現の候補が最大12件まで並びます。
             </div>
           </section>
-
-// …以下、右ペイン/フッタはあなたの最新版と同じ
 
         </form>
 
