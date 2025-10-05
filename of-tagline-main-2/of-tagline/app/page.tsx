@@ -708,13 +708,25 @@ export default function Page() {
           </section>
 
           {/* 左：言い換えサジェスト */}
+          // 省略: 上部はあなたの最新版 page.tsx と同じ（imports, utils, fetchers, component, state, handlers など）
+
+// …中略…
+
+          {/* 左：言い換えサジェスト（折りたたみ + 12件制限） */}
           <section className="bg-white rounded-2xl shadow p-4 space-y-2">
             <div className="text-sm font-medium">言い換えサジェスト</div>
-            <PhraseSuggest sourceText={currentText} onInsert={handleInsertPhrase} />
+            <PhraseSuggest
+              sourceText={currentText}
+              onInsert={handleInsertPhrase}
+              maxPhrases={12}
+            />
             <div className="text-[11px] text-neutral-500">
-              候補の「＋」を押すと仕上げ本文（右ペイン）末尾に追記します。
+              サマリーに「どのテーマが本文のどの表現に当たったか」を表示します。開くと候補が最大12件まで並びます。
             </div>
           </section>
+
+// …以下、右ペイン/フッタはあなたの最新版と同じ
+
         </form>
 
         {/* 右カラム：出力3段 */}
