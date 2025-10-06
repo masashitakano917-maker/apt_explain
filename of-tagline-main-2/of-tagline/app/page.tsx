@@ -2,8 +2,7 @@
 
 import React, { useMemo, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
-import PhraseSuggest from "../components/PhraseSuggest";
-import { PHRASE_BANK, PhraseEntry } from "../lib/phraseBank";
+import PhraseSuggest from "../components/PhraseSuggest"; // ← サジェストを復活
 
 /* ========= small utils ========= */
 const cn = (...a: (string | false | null | undefined)[]) => a.filter(Boolean).join(" ");
@@ -58,9 +57,8 @@ async function callDescribe(payload: {
 }
 
 type ReviewIssue = { sentence: string; reasons: { id: string; label: string }[] };
-async function callReview(
-  draftText: string,
-) {
+
+async function callReview(draftText: string) {
   const j = await safeJson<{
     improved?: string;
     text_after_check?: string;
@@ -70,7 +68,7 @@ async function callReview(
   }>("/api/review", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text: draftText ?? "" }),
+    body: JSON.stringify({ text: draftText ?? "" }), // factsは送らない
   });
 
   const improved =
@@ -97,60 +95,64 @@ async function callPolish(text: string, tone: string, minChars: number, maxChars
   return { text: polished, notes, changed: polished.trim() !== text.trim() };
 }
 
-/* ========= ハイライト関連 ========= */
-const escapeHtml = (s: string) =>
-  (s || "")
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-
-function highlightHtml(text: string, terms: string[]): string {
-  if (!text || !terms?.length) return escapeHtml(text);
-
-  // 重複や短い語の誤爆を避けるため、長い語順に
-  const uniq = Array.from(new Set(terms.filter(Boolean)));
-  const sorted = uniq.sort((a, b) => b.length - a.length);
-
-  // 正規表現にエスケープ
-  const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`(${sorted.map(esc).join("|")})`, "g");
-
-  // 既に <mark> を入れるので本文側は必ずエスケープしてから置換
-  const safe = escapeHtml(text);
-  return safe.replace(pattern, '<mark class="bg-yellow-200 px-0.5 rounded">$1</mark>');
-}
-
-function findMatchedThemes(text: string): PhraseEntry[] {
-  const t = text || "";
-  return PHRASE_BANK.filter(entry =>
-    entry.keywords.some(kw => kw && t.includes(kw)) ||
-    entry.phrases.some(ph => ph && t.includes(ph))
-  );
-}
-
-/* ========= UI: チップ ========= */
-function Chip({
-  active, children, onClick
-}: { active?: boolean; children: React.ReactNode; onClick?: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "px-2.5 py-1 rounded-full border text-xs",
-        active ? "bg-yellow-100 border-yellow-300 text-yellow-900"
-               : "bg-neutral-50 hover:bg-neutral-100 border-neutral-300 text-neutral-700"
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-/* ========= page ========= */
+/* ========= Tracker UI ========= */
 type StepState = "idle" | "active" | "done";
 type StepKey = "draft" | "check" | "polish";
+
+function StepDot({ state }: { state: StepState }) {
+  const base = "w-6 h-6 rounded-full flex items-center justify-center border select-none";
+  if (state === "done") return <div className={cn(base, "bg-black border-black text-white")}>✓</div>;
+  if (state === "active") return <div className={cn(base, "bg-orange-500/90 border-orange-600 text-white animate-pulse")}>✓</div>;
+  return <div className={cn(base, "bg-neutral-200 border-neutral-300")} />;
+}
+
+function StepTrack({
+  steps,
+  onStepClick,
+}: {
+  steps: Array<{ key: StepKey; label: string; sub?: string; state: StepState }>;
+  onStepClick?: (key: StepKey) => void;
+}) {
+  return (
+    <div className="bg-white rounded-2xl shadow p-4">
+      <div className="flex items-center gap-3">
+        {steps.map((s, idx) => {
+          const clickable = s.state !== "idle";
+          return (
+            <div key={s.key} className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => clickable && onStepClick?.(s.key)}
+                className={cn("flex flex-col items-center focus:outline-none", clickable ? "cursor-pointer" : "cursor-default")}
+                aria-label={`${s.label}へスクロール`}
+              >
+                <StepDot state={s.state} />
+                <div className="mt-1 text-[12px] leading-tight text-neutral-700 text-center">
+                  <div className="font-medium">{s.label}</div>
+                  {s.sub && <div className="text-neutral-500">{s.sub}</div>}
+                </div>
+              </button>
+              {idx < steps.length - 1 && (
+                <div
+                  className={cn(
+                    "h-[2px] w-14 rounded",
+                    steps[idx].state === "done" || steps[idx + 1].state !== "idle"
+                      ? "bg-orange-400"
+                      : "bg-neutral-200"
+                  )}
+                />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 type CheckStatus = "idle" | "running" | "done" | "error";
 
+/* ========= page ========= */
 export default function Page() {
   // 入力
   const [name, setName] = useState("");
@@ -161,7 +163,7 @@ export default function Page() {
   // トーン
   const tones = ["上品・落ち着いた", "一般的", "親しみやすい"] as const;
   type Tone = typeof tones[number];
-  const [tone, setTone] = useState<Tone>("上品・落ち着いた");
+  const [tone, setTone] = useState<Tone>("一般的");
 
   // 文字数
   const [minChars, setMinChars] = useState(450);
@@ -172,9 +174,9 @@ export default function Page() {
   const [error, setError] = useState<string | null>(null);
 
   // 出力
-  const [text1, setText1] = useState(""); // draft
-  const [text2, setText2] = useState(""); // reviewed
-  const [text3, setText3] = useState(""); // polished
+  const [text1, setText1] = useState("");
+  const [text2, setText2] = useState("");
+  const [text3, setText3] = useState("");
 
   // 差分
   const [diff12Html, setDiff12Html] = useState("");
@@ -184,7 +186,7 @@ export default function Page() {
   const [issues2, setIssues2] = useState<ReviewIssue[]>([]);
   const [summary2, setSummary2] = useState("");
 
-  // Polish
+  // Polishメモ・適用フラグ
   const [polishNotes, setPolishNotes] = useState<string[]>([]);
   const [polishApplied, setPolishApplied] = useState<boolean>(false);
 
@@ -208,16 +210,6 @@ export default function Page() {
   const validUrl = (s: string) => /^https?:\/\/\S+/i.test(String(s || "").trim());
   const currentText = text3 || text2 || text1;
 
-  /* ===== 言い換えサジェスト：テーマ選択とハイライト ===== */
-  const matchedThemes = useMemo(() => findMatchedThemes(currentText), [currentText]);
-  const [activeThemeIdx, setActiveThemeIdx] = useState<number | null>(null);
-  const activeTheme = activeThemeIdx == null ? null : matchedThemes[activeThemeIdx] || null;
-  const activeTerms = activeTheme ? [...activeTheme.phrases, ...activeTheme.keywords] : [];
-
-  const highlightDraftHtml   = useMemo(() => activeTheme ? highlightHtml(text1, activeTerms) : "", [text1, activeThemeIdx]);
-  const highlightCheckedHtml = useMemo(() => activeTheme ? highlightHtml(text2, activeTerms) : "", [text2, activeThemeIdx]);
-  const highlightPolishHtml  = useMemo(() => activeTheme ? highlightHtml(text3 || text2, activeTerms) : "", [text3, text2, activeThemeIdx]);
-
   /* 生成 */
   async function handleGenerate(e: React.FormEvent) {
     e.preventDefault();
@@ -229,7 +221,6 @@ export default function Page() {
     setIssues2([]); setSummary2(""); setPolishNotes([]); setPolishApplied(false);
     setCheckStatus("idle");
     setDraftStep("idle"); setCheckStep("idle"); setPolishStep("idle");
-    setActiveThemeIdx(null);
 
     try {
       if (!name.trim()) throw new Error("物件名を入力してください。");
@@ -284,7 +275,7 @@ export default function Page() {
       setPolishApplied(!!p.changed);
       setPolishStep("done");
 
-      // 差分（折りたたみ初期表示なのでここは生成だけ）
+      // 差分（初期は折りたたみ）
       setDiff12Html(markDiffRed(src, afterCheck));
       setDiff23Html(markDiffRed(afterCheck, p.text || afterCheck));
 
@@ -302,7 +293,7 @@ export default function Page() {
 
   function handleReset() {
     setName(""); setUrl(""); setMustInput("");
-    setTone("上品・落ち着いた");
+    setTone("一般的");
     setMinChars(450); setMaxChars(550);
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
@@ -310,26 +301,24 @@ export default function Page() {
     setError(null);
     setCheckStatus("idle");
     setDraftStep("idle"); setCheckStep("idle"); setPolishStep("idle");
-    setActiveThemeIdx(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text || ""); } catch {} };
 
+  // 言い換えの＋を押したとき：現在の表示テキストに追記
+  const handleInsertPhrase = (phrase: string) => {
+    const base = (text3 || text2 || text1 || "").trim();
+    const appended = base + (base.endsWith("。") ? "" : "。") + phrase.replace(/。?$/, "。");
+    if (text3) setText3(appended);
+    else if (text2) setText2(appended);
+    else setText1(appended);
+  };
+
   const statusLabel =
     checkStatus === "running" ? "実行中…" :
     checkStatus === "done"    ? "完了" :
     checkStatus === "error"   ? "エラー" : "未実行";
-  const statusClass =
-    checkStatus === "running" ? "bg-yellow-100 text-yellow-700" :
-    checkStatus === "done"    ? "bg-emerald-100 text-emerald-700" :
-    checkStatus === "error"   ? "bg-red-100 text-red-700" : "bg-neutral-100 text-neutral-600";
-
-  const stepsForTracker = [
-    { key: "draft"  as StepKey, label: "ドラフト",      sub: draftStep === "active" ? "作成中" : draftStep === "done" ? "完了" : "", state: draftStep },
-    { key: "check"  as StepKey, label: "安全チェック",  sub: checkStep === "active" ? "実行中" : checkStep === "done" ? "完了" : "", state: checkStep },
-    { key: "polish" as StepKey, label: "仕上げ提案",    sub: polishStep === "active" ? "生成中" : polishStep === "done" ? "完了" : "", state: polishStep },
-  ];
 
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
@@ -403,17 +392,33 @@ export default function Page() {
             <div className="flex items-center justify-between rounded-xl border bg-neutral-50 px-3 py-2">
               <div className="text-sm">自動チェック（ドラフト生成後に自動実行）</div>
               <div className="flex items-center gap-2">
-                <span className={cn("px-2 py-0.5 rounded-full text-xs", statusClass)}>{statusLabel}</span>
+                <span className={cn("px-2 py-0.5 rounded-full text-xs",
+                  checkStatus==="running"?"bg-yellow-100 text-yellow-700":
+                  checkStatus==="done"?"bg-emerald-100 text-emerald-700":
+                  checkStatus==="error"?"bg-red-100 text-red-700":"bg-neutral-100 text-neutral-600"
+                )}>{statusLabel}</span>
                 <Button type="button" onClick={() => handleCheck()} disabled={busy || !text1} className="px-3 py-1 text-xs">再実行</Button>
               </div>
             </div>
 
-            {/* 要点の要約（削除文が無くても表示） */}
-            {!!summary2 && (
-              <div className="text-xs text-neutral-500">要約: {summary2}</div>
+            {/* 削除文と理由（必要なら表示） */}
+            {issues2.length > 0 && (
+              <div className="space-y-2">
+                {issues2.map((it, i) => (
+                  <div key={i} className="rounded border p-2">
+                    <div className="text-xs text-neutral-500 mb-1">削除された文</div>
+                    <div className="text-sm mb-1 break-words">{it.sentence}</div>
+                    <ul className="text-xs text-neutral-600 list-disc pl-4">
+                      {(it.reasons || []).map((r, j) => <li key={j}>{r.label ?? r.id}</li>)}
+                    </ul>
+                  </div>
+                ))}
+              </div>
             )}
 
-            {/* 差分：初期は折りたたみ（要求どおり） */}
+            {!!summary2 && <div className="text-xs text-neutral-500">要約: {summary2}</div>}
+
+            {/* 差分（初期は折りたたみ） */}
             {(diff12Html || diff23Html) && (
               <div className="space-y-3">
                 {!!diff12Html && (
@@ -432,52 +437,37 @@ export default function Page() {
             )}
           </section>
 
-          {/* 言い換えサジェスト（折りたたみ/テーマ選択→ハイライト） */}
-          <section className="bg-white rounded-2xl shadow p-4 space-y-3">
-            <details open className="group">
-              <summary className="cursor-pointer list-none">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-medium">言い換えサジェスト</div>
-                  <div className="text-xs text-neutral-500">
-                    {matchedThemes.length}テーマ / 候補最大12件（クリックで本文ハイライト）
-                  </div>
-                </div>
+          {/* 言い換えサジェスト（初期は畳む／クリックで最大12候補） */}
+          <section className="bg-white rounded-2xl shadow p-4">
+            <details>
+              <summary className="cursor-pointer text-sm font-medium flex items-center gap-2">
+                言い換えサジェスト
+                <span className="text-xs text-neutral-500">(クリックで候補を表示)</span>
               </summary>
-
-              {/* テーマ行（横一列レイアウト、折り返しあり） */}
-              <div className="mt-3 flex flex-wrap gap-2">
-                {matchedThemes.map((t, i) => (
-                  <Chip key={i} active={i === activeThemeIdx} onClick={() => setActiveThemeIdx(i === activeThemeIdx ? null : i)}>
-                    {t.theme}
-                  </Chip>
-                ))}
-                {matchedThemes.length === 0 && (
-                  <span className="text-xs text-neutral-500">本文に基づく一致テーマはありません。</span>
-                )}
-                {activeTheme && (
-                  <Chip onClick={() => setActiveThemeIdx(null)}>ハイライト解除</Chip>
-                )}
-              </div>
-
-              {/* 候補一覧（最大12件） */}
               <div className="mt-3">
                 <PhraseSuggest
                   sourceText={currentText}
-                  onInsert={(p) => {
-                    // 右側の「一番下に表示されているテキスト」へ追記（用途：素早い文言追加）
-                    const base = text3 || text2 || text1;
-                    const glue = base && !base.endsWith("。") ? "。" : "";
-                    const next = (base || "") + glue + p;
-                    setText3(next); // 一旦仕上げ欄へ書き込む
-                  }}
+                  onInsert={handleInsertPhrase}
                 />
               </div>
             </details>
           </section>
         </form>
 
-        {/* 右カラム：出力3段（ハイライト適用） */}
+        {/* 右カラム：出力3段 */}
         <section className="space-y-4">
+          <StepTrack
+            steps={[
+              { key: "draft" as StepKey,  label: "ドラフト",     sub: draftStep==="active"?"作成中":draftStep==="done"?"完了":"", state: draftStep },
+              { key: "check" as StepKey,  label: "安全チェック", sub: checkStep==="active"?"実行中":checkStep==="done"?"完了":"", state: checkStep },
+              { key: "polish" as StepKey, label: "仕上げ提案",   sub: polishStep==="active"?"生成中":polishStep==="done"?"完了":"", state: polishStep },
+            ]}
+            onStepClick={(k)=> {
+              const map: any = { draft: draftRef.current, check: checkRef.current, polish: polishRef.current };
+              const el = map[k]; if (el) el.scrollIntoView({ behavior:"smooth", block:"start" });
+            }}
+          />
+
           {/* ドラフト */}
           <div ref={draftRef} className="bg-white rounded-2xl shadow min-h-[220px] flex flex-col overflow-hidden scroll-mt-24">
             <div className="p-4 border-b flex items-center justify-between">
@@ -488,15 +478,7 @@ export default function Page() {
               </div>
             </div>
             <div className="p-4 flex-1 overflow-auto">
-              {text1 ? (
-                activeTheme ? (
-                  <div className="whitespace-pre-wrap leading-relaxed text-[15px]" dangerouslySetInnerHTML={{ __html: highlightDraftHtml }} />
-                ) : (
-                  <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text1}</p>
-                )
-              ) : (
-                <div className="text-neutral-500 text-sm">— 未生成 —</div>
-              )}
+              {text1 ? <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text1}</p> : <div className="text-neutral-500 text-sm">— 未生成 —</div>}
             </div>
           </div>
 
@@ -510,15 +492,7 @@ export default function Page() {
               </div>
             </div>
             <div className="p-4 flex-1 overflow-auto">
-              {text2 ? (
-                activeTheme ? (
-                  <div className="whitespace-pre-wrap leading-relaxed text-[15px]" dangerouslySetInnerHTML={{ __html: highlightCheckedHtml }} />
-                ) : (
-                  <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text2}</p>
-                )
-              ) : (
-                <div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>
-              )}
+              {text2 ? <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text2}</p> : <div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>}
             </div>
           </div>
 
@@ -541,11 +515,7 @@ export default function Page() {
             <div className="p-4 flex-1 overflow-auto space-y-2">
               {text3 || text2 ? (
                 <>
-                  {activeTheme ? (
-                    <div className="whitespace-pre-wrap leading-relaxed text-[15px]" dangerouslySetInnerHTML={{ __html: highlightPolishHtml }} />
-                  ) : (
-                    <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text3 || text2}</p>
-                  )}
+                  <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text3 || text2}</p>
                   {polishNotes.length > 0 && (
                     <ul className="mt-1 list-disc pl-5 text-xs text-neutral-600">
                       {polishNotes.map((n, i) => <li key={i}>{n}</li>)}
@@ -561,7 +531,7 @@ export default function Page() {
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
               ※ ドラフトは <code>/api/describe</code>、安全チェックは <code>/api/review</code>、仕上げは <code>/api/polish</code> を使用。<br/>
-              テーマをクリックすると該当表現が本文側でハイライトされます（解除は「ハイライト解除」）。
+              仕上げでは不足文字数を補い、トーン/文流れを整えます。
             </div>
           </div>
         </section>
