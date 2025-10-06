@@ -2,6 +2,7 @@
 
 import React, { useMemo, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
+import PhraseSuggest from "../components/PhraseSuggest"; // ← サジェストを復活
 
 /* ========= small utils ========= */
 const cn = (...a: (string | false | null | undefined)[]) => a.filter(Boolean).join(" ");
@@ -67,7 +68,7 @@ async function callReview(draftText: string) {
   }>("/api/review", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text: draftText ?? "" }), // ← facts送らない
+    body: JSON.stringify({ text: draftText ?? "" }), // factsは送らない
   });
 
   const improved =
@@ -256,7 +257,7 @@ export default function Page() {
       setCheckStatus("running");
       setIssues2([]); setSummary2(""); setDiff12Html(""); setDiff23Html(""); setPolishNotes([]); setPolishApplied(false);
 
-      // ② review（factsは送らない）
+      // ② review
       const r = await callReview(src);
       const afterCheck = r.improved || src;
       setText2(afterCheck);
@@ -266,7 +267,7 @@ export default function Page() {
       setCheckStep("done");
       setTimeout(() => scrollTo("check"), 0);
 
-      // ③ polish（不足文字数があればここで増量＋トーン言い換え）
+      // ③ polish
       setPolishStep("active");
       const p = await callPolish(afterCheck, String(tone), minChars, maxChars);
       setText3(p.text || "");
@@ -274,7 +275,7 @@ export default function Page() {
       setPolishApplied(!!p.changed);
       setPolishStep("done");
 
-      // 差分（← 初期表示は折りたたみ）
+      // 差分（初期は折りたたみ）
       setDiff12Html(markDiffRed(src, afterCheck));
       setDiff23Html(markDiffRed(afterCheck, p.text || afterCheck));
 
@@ -305,20 +306,19 @@ export default function Page() {
 
   const copy = async (text: string) => { try { await navigator.clipboard.writeText(text || ""); } catch {} };
 
+  // 言い換えの＋を押したとき：現在の表示テキストに追記
+  const handleInsertPhrase = (phrase: string) => {
+    const base = (text3 || text2 || text1 || "").trim();
+    const appended = base + (base.endsWith("。") ? "" : "。") + phrase.replace(/。?$/, "。");
+    if (text3) setText3(appended);
+    else if (text2) setText2(appended);
+    else setText1(appended);
+  };
+
   const statusLabel =
     checkStatus === "running" ? "実行中…" :
     checkStatus === "done"    ? "完了" :
     checkStatus === "error"   ? "エラー" : "未実行";
-  const statusClass =
-    checkStatus === "running" ? "bg-yellow-100 text-yellow-700" :
-    checkStatus === "done"    ? "bg-emerald-100 text-emerald-700" :
-    checkStatus === "error"   ? "bg-red-100 text-red-700" : "bg-neutral-100 text-neutral-600";
-
-  const stepsForTracker = [
-    { key: "draft"  as StepKey, label: "ドラフト",      sub: draftStep === "active" ? "作成中" : draftStep === "done" ? "完了" : "", state: draftStep },
-    { key: "check"  as StepKey, label: "安全チェック",  sub: checkStep === "active" ? "実行中" : checkStep === "done" ? "完了" : "", state: checkStep },
-    { key: "polish" as StepKey, label: "仕上げ提案",    sub: polishStep === "active" ? "生成中" : polishStep === "done" ? "完了" : "", state: polishStep },
-  ];
 
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
@@ -356,7 +356,7 @@ export default function Page() {
               <label className="flex flex-col gap-1">
                 <span className="text-sm font-medium">トーン</span>
                 <select className="border rounded-lg p-2" value={tone} onChange={(e) => setTone(e.target.value as Tone)}>
-                  {tones.map((t) => <option key={t} value={t}>{t}</option>)}
+                  {["上品・落ち着いた","一般的","親しみやすい"].map((t) => <option key={t} value={t}>{t}</option>)}
                 </select>
               </label>
 
@@ -392,13 +392,11 @@ export default function Page() {
             <div className="flex items-center justify-between rounded-xl border bg-neutral-50 px-3 py-2">
               <div className="text-sm">自動チェック（ドラフト生成後に自動実行）</div>
               <div className="flex items-center gap-2">
-                <span className={cn("px-2 py-0.5 rounded-full text-xs", 
+                <span className={cn("px-2 py-0.5 rounded-full text-xs",
                   checkStatus==="running"?"bg-yellow-100 text-yellow-700":
                   checkStatus==="done"?"bg-emerald-100 text-emerald-700":
                   checkStatus==="error"?"bg-red-100 text-red-700":"bg-neutral-100 text-neutral-600"
-                )}>
-                  {statusLabel}
-                </span>
+                )}>{statusLabel}</span>
                 <Button type="button" onClick={() => handleCheck()} disabled={busy || !text1} className="px-3 py-1 text-xs">再実行</Button>
               </div>
             </div>
@@ -418,12 +416,9 @@ export default function Page() {
               </div>
             )}
 
-            {/* 要点の要約（削除文が無くても表示） */}
-            {!!summary2 && (
-              <div className="text-xs text-neutral-500">要約: {summary2}</div>
-            )}
+            {!!summary2 && <div className="text-xs text-neutral-500">要約: {summary2}</div>}
 
-            {/* 差分：初期状態は折りたたみ（open を外す） */}
+            {/* 差分（初期は折りたたみ） */}
             {(diff12Html || diff23Html) && (
               <div className="space-y-3">
                 {!!diff12Html && (
@@ -440,6 +435,22 @@ export default function Page() {
                 )}
               </div>
             )}
+          </section>
+
+          {/* 言い換えサジェスト（初期は畳む／クリックで最大12候補） */}
+          <section className="bg-white rounded-2xl shadow p-4">
+            <details>
+              <summary className="cursor-pointer text-sm font-medium flex items-center gap-2">
+                言い換えサジェスト
+                <span className="text-xs text-neutral-500">(クリックで候補を表示)</span>
+              </summary>
+              <div className="mt-3">
+                <PhraseSuggest
+                  sourceText={currentText}
+                  onInsert={handleInsertPhrase}
+                />
+              </div>
+            </details>
           </section>
         </form>
 
