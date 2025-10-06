@@ -2,124 +2,142 @@
 import React, { useMemo, useState } from "react";
 import { PHRASE_BANK, PhraseEntry } from "../lib/phraseBank";
 
-type Match = PhraseEntry & { hit: string | null };
-
-function findMatches(text: string): Match[] {
+function matchEntries(text: string): PhraseEntry[] {
   const t = text || "";
-  return PHRASE_BANK
-    .map((entry) => {
-      const hit = entry.keywords.find((kw) => kw && t.includes(kw)) || null;
-      return { ...entry, hit };
-    })
-    .filter((m) => !!m.hit);
+  return PHRASE_BANK.filter((entry) =>
+    entry.keywords.some((kw) => kw && t.includes(kw))
+  );
 }
+
+export type OnHighlightPayload = {
+  theme: string;
+  words: string[]; // ハイライト対象語（keywords + 見出し語）
+} | null;
 
 export default function PhraseSuggest({
   sourceText,
   onInsert,
-  onHighlight,        // ← 追加：選択テーマのキーワードを親に通知（本文ハイライト用）
-  maxPhrases = 12,
+  onHighlight,
+  maxCards = 12,
 }: {
   sourceText: string;
-  onInsert: (phrase: string) => void;
-  onHighlight?: (words: string[]) => void;
-  maxPhrases?: number;
+  onInsert: (phrase: string) => void; // クリックで本文へ挿入
+  onHighlight: (payload: OnHighlightPayload) => void; // テーマ選択→本文ハイライト
+  maxCards?: number;
 }) {
-  const matches = useMemo(() => findMatches(sourceText), [sourceText]);
-  const [activeTheme, setActiveTheme] = useState<string | null>(null);
+  const matches = useMemo(() => matchEntries(sourceText).slice(0, maxCards), [sourceText, maxCards]);
+  const [activeIdx, setActiveIdx] = useState<number | null>(null);
 
-  const chips = matches.map((m) => ({ theme: m.theme, hit: m.hit!, keywords: m.keywords }));
+  // ヘッダー用：横一列のテーマチップ
+  const headerChips = matches.map((m, i) => ({
+    label: m.theme,
+    words: Array.from(new Set([m.theme, ...m.keywords])).filter(Boolean),
+    i,
+  }));
 
-  // フィルタ：選択テーマがあればそれのみ
-  const filtered = activeTheme
-    ? matches.filter((m) => m.theme === activeTheme)
-    : matches;
-
-  // 表示候補（最大 maxPhrases 件）
-  const items: Array<{ theme: string; hit: string | null; phrase: string }> = [];
-  for (const m of filtered) {
-    for (const p of m.phrases) {
-      if (items.length >= maxPhrases) break;
-      items.push({ theme: m.theme, hit: m.hit, phrase: p });
-    }
-    if (items.length >= maxPhrases) break;
-  }
-
-  function toggleTheme(theme: string) {
-    const next = activeTheme === theme ? null : theme;
-    setActiveTheme(next);
-    if (!onHighlight) return;
-    if (!next) { onHighlight([]); return; }
-    const hit = matches.find((m) => m.theme === next);
-    onHighlight(hit ? hit.keywords.filter(Boolean) : []);
-  }
-
+  // 初期メッセージ
   if (!sourceText?.trim()) {
-    return <div className="text-xs text-neutral-500">ドラフトを生成すると、本文に合った言い換え候補を表示します。</div>;
+    return (
+      <div className="text-xs text-neutral-500">
+        ドラフトを生成すると、本文に合った言い換え候補を表示します。
+      </div>
+    );
   }
   if (matches.length === 0) {
-    return <div className="text-xs text-neutral-500">該当テーマが見つかりませんでした。キーワード（例：閑静／公園／管理）を含めると候補が出ます。</div>;
+    return (
+      <div className="text-xs text-neutral-500">
+        いまの本文からは該当テーマが見つかりませんでした。キーワード（例：閑静／公園／管理）を含めると候補が出ます。
+      </div>
+    );
   }
 
+  // テーマチップをクリック → アクティブ切替＆ハイライト更新
+  const toggleChip = (idx: number) => {
+    setActiveIdx((cur) => {
+      const next = cur === idx ? null : idx;
+      if (next === null) onHighlight(null);
+      else {
+        const entry = matches[next];
+        onHighlight({
+          theme: entry.theme,
+          words: Array.from(new Set([entry.theme, ...entry.keywords])).filter(Boolean),
+        });
+      }
+      return next;
+    });
+  };
+
   return (
-    <details className="rounded-lg border bg-white">
-      <summary className="cursor-pointer px-3 py-2 text-sm flex items-center gap-2 select-none">
-        <span className="font-medium">言い換えサジェスト</span>
-        <span className="text-xs text-neutral-500">
-          {matches.length}テーマ / 候補 {items.length} 件（最大{maxPhrases}）
-        </span>
-      </summary>
-
-      <div className="p-3 border-t space-y-3">
-        {/* ← チップを横並び＋折返しに変更（スクロール無し） */}
-        <div className="flex flex-wrap gap-2">
-          {chips.map((c, i) => {
-            const active = activeTheme === c.theme;
-            return (
-              <button
-                key={i}
-                type="button"
-                onClick={() => toggleTheme(c.theme)}
-                className={[
-                  "px-2 py-1 rounded-full text-[11px] border",
-                  active
-                    ? "bg-orange-50 border-orange-300 text-orange-800"
-                    : "bg-neutral-50 border-neutral-200 text-neutral-700 hover:bg-neutral-100",
-                ].join(" ")}
-                title={`${c.theme}（本文:「${c.hit}」）`}
-              >
-                {c.theme}（{c.hit}）
-              </button>
-            );
-          })}
-        </div>
-
-        {/* 表示候補（選択テーマのみ/未選択なら全体から最大件） */}
-        <ul className="text-sm leading-relaxed divide-y rounded border">
-          {items.map((it, i) => (
-            <li key={i} className="py-2 px-2 flex items-start gap-3">
-              <button
-                type="button"
-                className="shrink-0 mt-0.5 inline-flex items-center justify-center w-6 h-6 rounded bg-neutral-100 text-neutral-700 hover:bg-neutral-200"
-                title="この表現を挿入"
-                onClick={() => onInsert(it.phrase)}
-              >
-                ＋
-              </button>
-              <div className="min-w-0">
-                <div className="text-[11px] text-neutral-500 mb-0.5">
-                  {it.theme}{it.hit ? `（本文:「${it.hit}」）` : ""}
-                </div>
-                <div className="break-words">{it.phrase}</div>
-              </div>
-            </li>
-          ))}
-        </ul>
-
-        <div className="text-[11px] text-neutral-500">
-          テーマをクリックすると本文中の該当語をハイライトします。もう一度押すと解除します。
-        </div>
+    <div className="space-y-3">
+      {/* テーマチップ（横並び・2段回り込み） */}
+      <div className="flex flex-wrap gap-2">
+        {headerChips.map((c) => {
+          const active = activeIdx === c.i;
+          return (
+            <button
+              key={c.i}
+              type="button"
+              onClick={() => toggleChip(c.i)}
+              className={
+                "px-2 py-1 rounded-full text-xs border " +
+                (active
+                  ? "bg-yellow-100 border-yellow-300 text-yellow-900"
+                  : "bg-neutral-100 border-neutral-300 text-neutral-700 hover:bg-neutral-200")
+              }
+              title={`本文をハイライト：${c.label}`}
+            >
+              {c.label}
+            </button>
+          );
+        })}
       </div>
-    </details>
+
+      {/* マッチしたカード群 */}
+      {matches.map((entry, idx) => (
+        <div key={idx} className="rounded-lg border bg-white">
+          <div className="px-3 py-2 text-xs font-medium text-neutral-700 border-b flex items-center justify-between">
+            <div>
+              {entry.theme}の表現
+              <span className="ml-2 text-[11px] text-neutral-500">
+                {entry.keywords.join(" / ")}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  toggleChip(idx)
+                }
+                className={
+                  "px-2 py-0.5 rounded text-[11px] border " +
+                  (activeIdx === idx
+                    ? "bg-yellow-100 border-yellow-300 text-yellow-900"
+                    : "bg-neutral-50 border-neutral-300 text-neutral-600 hover:bg-neutral-100")
+                }
+                title="このテーマの語を本文でハイライト"
+              >
+                {activeIdx === idx ? "ハイライト中" : "ハイライト"}
+              </button>
+            </div>
+          </div>
+
+          <ul className="p-2 text-sm leading-relaxed">
+            {entry.phrases.map((p, i) => (
+              <li key={i} className="flex items-start gap-2 py-1">
+                <button
+                  type="button"
+                  className="shrink-0 mt-0.5 inline-flex items-center justify-center w-6 h-6 rounded bg-neutral-100 text-neutral-700 hover:bg-neutral-200"
+                  title="この表現を挿入"
+                  onClick={() => onInsert(p)}
+                >
+                  ＋
+                </button>
+                <span>{p}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
   );
 }
