@@ -2,7 +2,6 @@
 
 import React, { useMemo, useRef, useState } from "react";
 import { Button } from "../components/ui/Button";
-import PhraseSuggest from "../components/PhraseSuggest";
 
 /* ========= small utils ========= */
 const cn = (...a: (string | false | null | undefined)[]) => a.filter(Boolean).join(" ");
@@ -57,16 +56,8 @@ async function callDescribe(payload: {
 }
 
 type ReviewIssue = { sentence: string; reasons: { id: string; label: string }[] };
-async function callReview(
-  draftText: string,
-  facts?: {
-    units?: number | string;
-    structure?: string;
-    built?: string;
-    management?: string;
-    maintFeeNote?: string;
-  }
-) {
+
+async function callReview(draftText: string) {
   const j = await safeJson<{
     improved?: string;
     text_after_check?: string;
@@ -76,7 +67,7 @@ async function callReview(
   }>("/api/review", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text: draftText ?? "", facts: facts ?? {} }),
+    body: JSON.stringify({ text: draftText ?? "" }), // ← facts送らない
   });
 
   const improved =
@@ -103,24 +94,9 @@ async function callPolish(text: string, tone: string, minChars: number, maxChars
   return { text: polished, notes, changed: polished.trim() !== text.trim() };
 }
 
-/* ========= highlight helpers ========= */
-const escapeReg = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-function highlightHtml(text: string, words: string[]) {
-  if (!text) return "";
-  if (!words?.length) return text.replace(/\n/g, "<br/>");
-  const sorted = [...new Set(words.filter(Boolean))].sort((a,b)=>b.length-a.length);
-  let out = text;
-  for (const w of sorted) {
-    const re = new RegExp(escapeReg(w), "g");
-    out = out.replace(re, (m) => `<mark class="bg-yellow-100 text-yellow-900">${m}</mark>`);
-  }
-  return out.replace(/\n/g, "<br/>");
-}
-
-/* ========= page ========= */
+/* ========= Tracker UI ========= */
 type StepState = "idle" | "active" | "done";
 type StepKey = "draft" | "check" | "polish";
-type CheckStatus = "idle" | "running" | "done" | "error";
 
 function StepDot({ state }: { state: StepState }) {
   const base = "w-6 h-6 rounded-full flex items-center justify-center border select-none";
@@ -128,6 +104,7 @@ function StepDot({ state }: { state: StepState }) {
   if (state === "active") return <div className={cn(base, "bg-orange-500/90 border-orange-600 text-white animate-pulse")}>✓</div>;
   return <div className={cn(base, "bg-neutral-200 border-neutral-300")} />;
 }
+
 function StepTrack({
   steps,
   onStepClick,
@@ -172,6 +149,9 @@ function StepTrack({
   );
 }
 
+type CheckStatus = "idle" | "running" | "done" | "error";
+
+/* ========= page ========= */
 export default function Page() {
   // 入力
   const [name, setName] = useState("");
@@ -182,18 +162,11 @@ export default function Page() {
   // トーン
   const tones = ["上品・落ち着いた", "一般的", "親しみやすい"] as const;
   type Tone = typeof tones[number];
-  const [tone, setTone] = useState<Tone>("上品・落ち着いた");
+  const [tone, setTone] = useState<Tone>("一般的");
 
   // 文字数
   const [minChars, setMinChars] = useState(450);
   const [maxChars, setMaxChars] = useState(550);
-
-  // 追加：基本情報（任意：/api/review の facts 用）
-  const [units, setUnits] = useState<string>("");
-  const [structure, setStructure] = useState<string>("");
-  const [built, setBuilt] = useState<string>("");
-  const [management, setManagement] = useState<string>("");
-  const [maintFeeNote, setMaintFeeNote] = useState<string>("");
 
   // 状態
   const [busy, setBusy] = useState(false);
@@ -215,9 +188,6 @@ export default function Page() {
   // Polishメモ・適用フラグ
   const [polishNotes, setPolishNotes] = useState<string[]>([]);
   const [polishApplied, setPolishApplied] = useState<boolean>(false);
-
-  // ハイライト（言い換えテーマから受け取る）
-  const [highlightWords, setHighlightWords] = useState<string[]>([]);
 
   // ステップ／ステータス
   const [checkStatus, setCheckStatus] = useState<CheckStatus>("idle");
@@ -248,7 +218,6 @@ export default function Page() {
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
     setIssues2([]); setSummary2(""); setPolishNotes([]); setPolishApplied(false);
-    setHighlightWords([]);
     setCheckStatus("idle");
     setDraftStep("idle"); setCheckStep("idle"); setPolishStep("idle");
 
@@ -287,15 +256,8 @@ export default function Page() {
       setCheckStatus("running");
       setIssues2([]); setSummary2(""); setDiff12Html(""); setDiff23Html(""); setPolishNotes([]); setPolishApplied(false);
 
-      const facts: any = {};
-      if (units) facts.units = units;
-      if (structure) facts.structure = structure;
-      if (built) facts.built = built;
-      if (management) facts.management = management;
-      if (maintFeeNote) facts.maintFeeNote = maintFeeNote;
-
-      // ② review
-      const r = await callReview(src, facts);
+      // ② review（factsは送らない）
+      const r = await callReview(src);
       const afterCheck = r.improved || src;
       setText2(afterCheck);
       setIssues2(r.issues || []);
@@ -304,7 +266,7 @@ export default function Page() {
       setCheckStep("done");
       setTimeout(() => scrollTo("check"), 0);
 
-      // ③ polish
+      // ③ polish（不足文字数があればここで増量＋トーン言い換え）
       setPolishStep("active");
       const p = await callPolish(afterCheck, String(tone), minChars, maxChars);
       setText3(p.text || "");
@@ -312,7 +274,7 @@ export default function Page() {
       setPolishApplied(!!p.changed);
       setPolishStep("done");
 
-      // 差分
+      // 差分（← 初期表示は折りたたみ）
       setDiff12Html(markDiffRed(src, afterCheck));
       setDiff23Html(markDiffRed(afterCheck, p.text || afterCheck));
 
@@ -328,23 +290,13 @@ export default function Page() {
     }
   }
 
-  // 言い換えの＋ボタンで本文末に追記（仕上げ→安全→ドラフトの優先順）
-  function handleInsertPhrase(phrase: string) {
-    const sep = (s: string) => (s && !/[。．.!?！？]$/.test(s.trim()) ? "。" : "");
-    if (text3) { const t = `${text3}${sep(text3)}${phrase}`; setText3(t); return; }
-    if (text2) { const t = `${text2}${sep(text2)}${phrase}`; setText2(t); return; }
-    if (text1) { const t = `${text1}${sep(text1)}${phrase}`; setText1(t); return; }
-  }
-
   function handleReset() {
     setName(""); setUrl(""); setMustInput("");
-    setTone("上品・落ち着いた");
+    setTone("一般的");
     setMinChars(450); setMaxChars(550);
-    setUnits(""); setStructure(""); setBuilt(""); setManagement(""); setMaintFeeNote("");
     setText1(""); setText2(""); setText3("");
     setDiff12Html(""); setDiff23Html("");
     setIssues2([]); setSummary2(""); setPolishNotes([]); setPolishApplied(false);
-    setHighlightWords([]);
     setError(null);
     setCheckStatus("idle");
     setDraftStep("idle"); setCheckStep("idle"); setPolishStep("idle");
@@ -361,6 +313,12 @@ export default function Page() {
     checkStatus === "running" ? "bg-yellow-100 text-yellow-700" :
     checkStatus === "done"    ? "bg-emerald-100 text-emerald-700" :
     checkStatus === "error"   ? "bg-red-100 text-red-700" : "bg-neutral-100 text-neutral-600";
+
+  const stepsForTracker = [
+    { key: "draft"  as StepKey, label: "ドラフト",      sub: draftStep === "active" ? "作成中" : draftStep === "done" ? "完了" : "", state: draftStep },
+    { key: "check"  as StepKey, label: "安全チェック",  sub: checkStep === "active" ? "実行中" : checkStep === "done" ? "完了" : "", state: checkStep },
+    { key: "polish" as StepKey, label: "仕上げ提案",    sub: polishStep === "active" ? "生成中" : polishStep === "done" ? "完了" : "", state: polishStep },
+  ];
 
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900">
@@ -398,7 +356,7 @@ export default function Page() {
               <label className="flex flex-col gap-1">
                 <span className="text-sm font-medium">トーン</span>
                 <select className="border rounded-lg p-2" value={tone} onChange={(e) => setTone(e.target.value as Tone)}>
-                  {["上品・落ち着いた","一般的","親しみやすい"].map((t) => <option key={t} value={t}>{t}</option>)}
+                  {tones.map((t) => <option key={t} value={t}>{t}</option>)}
                 </select>
               </label>
 
@@ -417,33 +375,6 @@ export default function Page() {
                   推奨：450〜550　|　現在：{minChars}〜{maxChars}　|　最新本文長：{jaLen(currentText)} 文字
                 </div>
               </div>
-
-              {/* facts（任意） */}
-              <details className="rounded-lg border bg-neutral-50 p-3">
-                <summary className="cursor-pointer text-sm font-medium">基本情報（任意・本文に無い場合のみ自動補足）</summary>
-                <div className="grid grid-cols-2 gap-3 mt-3">
-                  <label className="flex flex-col gap-1">
-                    <span className="text-xs text-neutral-600">総戸数</span>
-                    <input className="border rounded p-2" placeholder="例）33" value={units} onChange={(e)=>setUnits(e.target.value)} />
-                  </label>
-                  <label className="flex flex-col gap-1">
-                    <span className="text-xs text-neutral-600">構造（RC/SRC など）</span>
-                    <input className="border rounded p-2" placeholder="例）RC" value={structure} onChange={(e)=>setStructure(e.target.value)} />
-                  </label>
-                  <label className="flex flex-col gap-1">
-                    <span className="text-xs text-neutral-600">築年</span>
-                    <input className="border rounded p-2" placeholder="例）1998年築 / 1998年10月築" value={built} onChange={(e)=>setBuilt(e.target.value)} />
-                  </label>
-                  <label className="flex flex-col gap-1">
-                    <span className="text-xs text-neutral-600">管理体制</span>
-                    <input className="border rounded p-2" placeholder="例）管理会社に全部委託・日勤／巡回" value={management} onChange={(e)=>setManagement(e.target.value)} />
-                  </label>
-                  <label className="flex flex-col gap-1 col-span-2">
-                    <span className="text-xs text-neutral-600">管理に関する補足（任意）</span>
-                    <input className="border rounded p-2" placeholder="例）長期修繕計画あり" value={maintFeeNote} onChange={(e)=>setMaintFeeNote(e.target.value)} />
-                  </label>
-                </div>
-              </details>
 
               <div className="flex gap-3">
                 <Button type="submit" disabled={busy || !name || !url}>{busy && checkStatus !== "running" ? "処理中…" : "文章を生成"}</Button>
@@ -472,7 +403,7 @@ export default function Page() {
               </div>
             </div>
 
-            {/* 削除文と理由 */}
+            {/* 削除文と理由（必要なら表示） */}
             {issues2.length > 0 && (
               <div className="space-y-2">
                 {issues2.map((it, i) => (
@@ -492,10 +423,11 @@ export default function Page() {
               <div className="text-xs text-neutral-500">要約: {summary2}</div>
             )}
 
+            {/* 差分：初期状態は折りたたみ（open を外す） */}
             {(diff12Html || diff23Html) && (
               <div className="space-y-3">
                 {!!diff12Html && (
-                  <details open className="rounded border">
+                  <details className="rounded border">
                     <summary className="cursor-pointer px-3 py-2 text-sm bg-neutral-50">差分（ドラフト → 安全チェック済）</summary>
                     <div className="p-3 text-sm leading-relaxed" dangerouslySetInnerHTML={{ __html: diff12Html }} />
                   </details>
@@ -508,17 +440,6 @@ export default function Page() {
                 )}
               </div>
             )}
-          </section>
-
-          {/* 言い換えサジェスト（折りたたみ + 横並びチップ / 本文ハイライト連動） */}
-          <section className="bg-white rounded-2xl shadow p-4 space-y-2">
-            <div className="text-sm font-medium">言い換えサジェスト</div>
-            <PhraseSuggest
-              sourceText={currentText}
-              onInsert={handleInsertPhrase}
-              onHighlight={setHighlightWords}
-              maxPhrases={12}
-            />
           </section>
         </form>
 
@@ -546,14 +467,7 @@ export default function Page() {
               </div>
             </div>
             <div className="p-4 flex-1 overflow-auto">
-              {text1 ? (
-                <div
-                  className="leading-relaxed text-[15px] whitespace-pre-wrap"
-                  dangerouslySetInnerHTML={{ __html: highlightHtml(text1, highlightWords) }}
-                />
-              ) : (
-                <div className="text-neutral-500 text-sm">— 未生成 —</div>
-              )}
+              {text1 ? <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text1}</p> : <div className="text-neutral-500 text-sm">— 未生成 —</div>}
             </div>
           </div>
 
@@ -567,14 +481,7 @@ export default function Page() {
               </div>
             </div>
             <div className="p-4 flex-1 overflow-auto">
-              {text2 ? (
-                <div
-                  className="leading-relaxed text-[15px] whitespace-pre-wrap"
-                  dangerouslySetInnerHTML={{ __html: highlightHtml(text2, highlightWords) }}
-                />
-              ) : (
-                <div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>
-              )}
+              {text2 ? <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text2}</p> : <div className="text-neutral-500 text-sm">— 自動チェック待ち／未実行 —</div>}
             </div>
           </div>
 
@@ -597,10 +504,7 @@ export default function Page() {
             <div className="p-4 flex-1 overflow-auto space-y-2">
               {text3 || text2 ? (
                 <>
-                  <div
-                    className="leading-relaxed text-[15px] whitespace-pre-wrap"
-                    dangerouslySetInnerHTML={{ __html: highlightHtml(text3 || text2, highlightWords) }}
-                  />
+                  <p className="whitespace-pre-wrap leading-relaxed text-[15px]">{text3 || text2}</p>
                   {polishNotes.length > 0 && (
                     <ul className="mt-1 list-disc pl-5 text-xs text-neutral-600">
                       {polishNotes.map((n, i) => <li key={i}>{n}</li>)}
@@ -616,7 +520,7 @@ export default function Page() {
           <div className="bg-white rounded-2xl shadow p-4">
             <div className="text-xs text-neutral-500 leading-relaxed">
               ※ ドラフトは <code>/api/describe</code>、安全チェックは <code>/api/review</code>、仕上げは <code>/api/polish</code> を使用。<br/>
-              言い換えサジェストはテーマ選択で本文の該当語をハイライトします。
+              仕上げでは不足文字数を補い、トーン/文流れを整えます。
             </div>
           </div>
         </section>
